@@ -73,7 +73,9 @@ class HNO3CrossSection:
     @classmethod
     def from_file(cls, td, wl_edges, lower_extrap=None, upper_extrap=None):
         s0 = _rebin_param(td.wavelength, td.parameters[:, 0], wl_edges, lower_extrap, upper_extrap)
-        b = _rebin_param(td.wavelength, td.parameters[:, 1], wl_edges, lower_extrap, upper_extrap)
+        # the temperature coefficient B is boundary-extrapolated at both ends (hno3-oh_no2.F90
+        # forces this), which affects its conserving rebin in the edge wavelength cells
+        b = _rebin_param(td.wavelength, td.parameters[:, 1], wl_edges, "boundary", "boundary")
         return cls(sigma0=s0, b=b)
 
     def evaluate(self, temperature) -> np.ndarray:
