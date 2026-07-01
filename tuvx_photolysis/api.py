@@ -29,6 +29,8 @@ from .quantum_yield import (
     clono2_quantum_yield,
     hno4_branching_quantum_yield,
     clooocl_branching_quantum_yield,
+    o3_o1d_quantum_yield,
+    o3_o3p_quantum_yield,
 )
 
 __all__ = ["PhotolysisCalculator"]
@@ -338,6 +340,10 @@ def _eval_reaction_xs(xs_cfg, rel, wl_edges, wl_mid, temperature, n_lev):
 
 def _eval_reaction_qy(qy_cfg, rel, wl_edges, wl_mid, temperature, n_lev, n_wl):
     t = qy_cfg.get("type")
+    if t == "O3+hv->O2+O(1D)":
+        return o3_o1d_quantum_yield(wl_mid, temperature.edge_val)
+    if t == "O3+hv->O2+O(3P)":
+        return o3_o3p_quantum_yield(wl_mid, temperature.edge_val)
     if t in ("ClONO2+hv->Cl+NO3", "ClONO2+hv->ClO+NO2"):
         branch = "Cl+NO3" if t.endswith("Cl+NO3") else "ClO+NO2"
         return clono2_quantum_yield(wl_mid, n_lev, branch)

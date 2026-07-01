@@ -24,7 +24,53 @@ __all__ = [
     "clono2_quantum_yield",
     "hno4_branching_quantum_yield",
     "clooocl_branching_quantum_yield",
+    "o3_o1d_quantum_yield",
+    "o3_o3p_quantum_yield",
 ]
+
+# Matsumi et al. (2002) O(1D) quantum-yield parameters (JGR 107, 10.1029/2001JD000510),
+# shared by both O3 photolysis channels; see src/quantum_yields/o3-o2_o1d.F90.
+_O3_A = np.array([0.8036, 8.9061, 0.1192])
+_O3_X = np.array([304.225, 314.957, 310.737])
+_O3_OM = np.array([5.576, 6.601, 2.187])
+
+
+def o3_o1d_quantum_yield(wl_mid, temperature_edge) -> np.ndarray:
+    """Φ for O3 + hv -> O2 + O(1D), Matsumi et al. (2002).
+
+    Port of ``src/quantum_yields/o3-o2_o1d.F90``. Temperature-dependent, evaluated per interface
+    (``temperature_edge`` = temperature at the height-grid edges). Returns ``(n_levels, n_wl)``.
+
+    Wavelength regimes (λ in nm): λ ≤ 305 → 0.90; 305 < λ ≤ 328 → the Matsumi analytic form;
+    328 < λ ≤ 340 → 0.08; λ > 340 → 0 (matches the Fortran ``where``/loop structure exactly).
+    """
+    w = np.asarray(wl_mid, dtype=float)
+    T = np.asarray(temperature_edge, dtype=float)
+    a, x, om = _O3_A, _O3_X, _O3_OM
+
+    qy = np.zeros((T.size, w.size))
+    lo = w <= 305.0
+    mid = (w > 305.0) & (w <= 328.0)
+    hi = (w > 328.0) & (w <= 340.0)
+    lam = w[mid]
+    for i, Ti in enumerate(T):
+        kt = 0.695 * Ti
+        q1, q2 = 1.0, np.exp(-825.518 / kt)
+        qfac1, qfac2 = q1 / (q1 + q2), q2 / (q1 + q2)
+        t300 = Ti / 300.0
+        row = qy[i]
+        row[lo] = 0.90
+        row[hi] = 0.08
+        row[mid] = (0.0765
+                    + a[0] * qfac1 * np.exp(-((x[0] - lam) / om[0]) ** 4)
+                    + a[1] * t300 * t300 * qfac2 * np.exp(-((x[1] - lam) / om[1]) ** 2)
+                    + a[2] * t300 ** 1.5 * np.exp(-((x[2] - lam) / om[2]) ** 2))
+    return qy
+
+
+def o3_o3p_quantum_yield(wl_mid, temperature_edge) -> np.ndarray:
+    """Φ for O3 + hv -> O2 + O(3P) = 1 − Φ(O(1D)); see src/quantum_yields/o3-o2_o3p.F90."""
+    return 1.0 - o3_o1d_quantum_yield(wl_mid, temperature_edge)
 
 
 def hno4_branching_quantum_yield(wl_mid, n_levels, channel) -> np.ndarray:
