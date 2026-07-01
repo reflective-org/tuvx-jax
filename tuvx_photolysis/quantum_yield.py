@@ -97,6 +97,13 @@ def clooocl_branching_quantum_yield(wl_mid, n_levels, channel) -> np.ndarray:
     Φ(Cl+ClOO) = 0.8 at all wavelengths; the remaining 0.2 goes to the 2ClO (+ClO+Cl+O) channel.
     Both channels share the ClOOCl absorption cross section. ``channel`` is ``"Cl+ClOO"`` or
     ``"2ClO"``.
+
+    NOTE (faithfulness): this is a deliberate extension, opt-in via ``rate_constants(..., branching=True)``.
+    Fortran TUV-x carries a single ClOOCl channel with unit quantum yield, so branching output is NOT
+    Fortran-comparable. The 2ClO channel is also new relative to the reference MATLAB box model (which
+    had only *thermal* ClOOCl->ClO+ClO plus photolytic ClOOCl->2Cl); enabling it therefore changes
+    ClOOCl chemistry versus the reference run. The 0.8/0.2 split is wavelength-independent per JPL §F7;
+    confirm the value against your JPL 19-5 copy before relying on it for ozone-loss magnitudes.
     """
     wl = np.asarray(wl_mid, dtype=float)
     val = 0.8 if channel == "Cl+ClOO" else (0.2 if channel == "2ClO" else None)

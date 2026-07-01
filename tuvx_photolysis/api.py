@@ -7,9 +7,11 @@ geometry -> radiator optical properties -> delta-Eddington radiation field -> ac
 per-reaction wavelength integration -> J profile (and J interpolated to an altitude).
 
 :meth:`PhotolysisCalculator.from_tuvx_json` parses a TUV-x JSON config (the air/O2/O3 radiators,
-base/O3 cross sections, and constant/tabulated quantum yields). Reactions whose recipes are not yet
-ported (special cross-section/quantum-yield modules, or O2 ``apply O2 bands`` / LA-SR) are recorded
-in ``skipped_reactions`` rather than silently dropped.
+base/O3 cross sections, and constant/tabulated quantum yields). The O2 ``apply O2 bands`` /
+Lyman-alpha-Schumann-Runge parameterization is ported (see ``la_sr_bands.py``); it is only skipped
+when the grid does not carry the LA/SR band edges. Reactions whose recipes are still unported
+(unsupported special cross-section/quantum-yield modules) are recorded in ``skipped_reactions``
+rather than silently dropped.
 """
 
 from __future__ import annotations
@@ -223,6 +225,10 @@ class PhotolysisCalculator:
                     o2_index = len(rad_list)
                 rad_list.append(radiators.absorber_radiator(dens_prof, base))
             else:
+                # DEFERRED: the aerosol radiator (config ``"type": "aerosol"`` with explicit optical
+                # depths / SSA / g, e.g. examples/tuv_5_4.json) is not yet wired here, so the aerosol
+                # config currently cannot be loaded. ``radiators.aerosol_radiator`` exists but is
+                # unused, and tests/fixtures/tuv_5_4_reference.nc is not compared. See REVIEW_FINDINGS.md.
                 raise ValueError(f"unsupported radiator cross section type: {xs.get('type')}")
 
         # --- reactions: precompute sigma * phi at interfaces (sza-independent) ---
