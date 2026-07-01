@@ -27,6 +27,8 @@ from .quantum_yield import (
     TabulatedQuantumYield,
     TintQuantumYield,
     clono2_quantum_yield,
+    hno4_branching_quantum_yield,
+    clooocl_branching_quantum_yield,
 )
 
 __all__ = ["PhotolysisCalculator"]
@@ -50,11 +52,18 @@ class PhotolysisCalculator:
     air_exo: np.ndarray | None = None  # air exospheric layer densities (for slant columns)
     o2_exo: np.ndarray | None = None  # O2 exospheric layer densities
     o2_reaction: dict | None = None  # O2 photolysis reaction: {name, sigma_base (n_lev,n_wl), phi}
+    # JPL product-branching channels: name -> sigma*phi_channel (opt-in via branching=True). These
+    # split HNO4 / ClOOCl photolysis into their product channels using the JPL branching quantum
+    # yields; they are NOT Fortran-comparable (TUV-x carries only one channel each).
+    branching_specs: dict = field(default_factory=dict)
 
-    def reaction_names(self):
+    def reaction_names(self, branching: bool = False):
         names = list(self.xsqy)
         if self.o2_reaction is not None:
             names.append(self.o2_reaction["name"])
+        if branching:
+            names = [n for n in names if n not in self.branching_specs]
+            names += list(self.branching_specs)
         return names
 
     # ---- solving -------------------------------------------------------------------------------
@@ -84,8 +93,16 @@ class PhotolysisCalculator:
     def radiation_field(self, solar_zenith_angle_deg: float):
         return self._solve(solar_zenith_angle_deg)[0]
 
-    def rate_constants_profile(self, solar_zenith_angle_deg: float, earth_sun_distance: float = 1.0):
-        """Return ``{reaction: J[n_levels]}`` (s-1) for the whole column at this solar position."""
+    def rate_constants_profile(
+        self, solar_zenith_angle_deg: float, earth_sun_distance: float = 1.0, branching: bool = False
+    ):
+        """Return ``{reaction: J[n_levels]}`` (s-1) for the whole column at this solar position.
+
+        With ``branching=True`` the JPL product-branching quantum yields are applied to HNO4 and
+        ClOOCl: their primary channels are corrected (e.g. HNO4->HO2+NO2 scaled by ~0.8) and the
+        secondary channels (HNO4->OH+NO3, ClOOCl->ClO+ClO) are added. Default ``False`` keeps the
+        output faithful to the Fortran TUV-x (single channel with unit quantum yield).
+        """
         rf, columns = self._solve(solar_zenith_angle_deg)
         # the Fortran scales the radiation field by the Earth-Sun distance before integrating
         flux = photolysis.actinic_flux(
@@ -104,6 +121,9 @@ class PhotolysisCalculator:
                     sigma, o2_scol, air_vcol, air_scol, self.temperature_edge
                 )
             out[self.o2_reaction["name"]] = np.sum(flux * sigma * self.o2_reaction["phi"], axis=1)
+        if branching:
+            for name, sq in self.branching_specs.items():
+                out[name] = np.sum(flux * sq, axis=1)  # overrides primary, adds secondary channels
         return out
 
     def rate_constants(
@@ -115,21 +135,23 @@ class PhotolysisCalculator:
         day: int,
         utc_hour: float,
         altitude_km: float | None = None,
+        branching: bool = False,
     ):
         """J-values (s-1) at a date/lat/lon/time, optionally interpolated to ``altitude_km``.
 
         Returns ``{reaction: J}`` at the requested altitude, or ``{reaction: J[n_levels]}`` for the
         full column if ``altitude_km`` is None. Solar zenith angle and Earth-Sun distance use the
         ported TUV-x astronomy (callers may instead drive :meth:`rate_constants_profile` with their
-        own SZA, e.g. frank-model's solar.py).
+        own SZA, e.g. frank-model's solar.py). ``branching=True`` applies the JPL product-branching
+        quantum yields for HNO4 and ClOOCl (see :meth:`rate_constants_profile`).
         """
         sza = geometry.solar_zenith_angle(year, month, day, utc_hour, latitude, longitude)
         if sza >= 90.0:
             zero = np.zeros(self.height_edges_km.size)
-            prof = {name: zero.copy() for name in self.reaction_names()}
+            prof = {name: zero.copy() for name in self.reaction_names(branching)}
         else:
             esd = geometry.earth_sun_distance(year, month, day, utc_hour)
-            prof = self.rate_constants_profile(sza, esd)
+            prof = self.rate_constants_profile(sza, esd, branching=branching)
         if altitude_km is None:
             return prof
         return {name: float(np.interp(altitude_km, self.height_edges_km, J)) for name, J in prof.items()}
@@ -226,6 +248,25 @@ class PhotolysisCalculator:
                 continue
             xsqy[name] = sigma * phi
 
+        # --- JPL product-branching channels for HNO4 and ClOOCl ---
+        # Both reactions use a base cross section with unit quantum yield in the config, so their
+        # xsqy entry IS the shared absorption cross section sigma. The JPL branching quantum yields
+        # split that absorption into product channels (Table 4C-9-2 for HNO4; Section F7 for ClOOCl).
+        branching_specs = {}
+        n_wl = wl_mid.size
+        if "HNO4+hv->HO2+NO2" in xsqy:
+            sigma_hno4 = xsqy["HNO4+hv->HO2+NO2"]  # phi == 1 in the config
+            branching_specs["HNO4+hv->HO2+NO2"] = sigma_hno4 * hno4_branching_quantum_yield(
+                wl_mid, n_lev, "HO2+NO2")
+            branching_specs["HNO4+hv->OH+NO3"] = sigma_hno4 * hno4_branching_quantum_yield(
+                wl_mid, n_lev, "OH+NO3")
+        if "ClOOCl+hv->Cl+ClOO" in xsqy:
+            sigma_clooocl = xsqy["ClOOCl+hv->Cl+ClOO"]
+            branching_specs["ClOOCl+hv->Cl+ClOO"] = sigma_clooocl * clooocl_branching_quantum_yield(
+                wl_mid, n_lev, "Cl+ClOO")
+            branching_specs["ClOOCl+hv->ClO+ClO"] = sigma_clooocl * clooocl_branching_quantum_yield(
+                wl_mid, n_lev, "2ClO")
+
         return cls(
             wl_edges=wl_edges,
             height_edges_km=height_edges,
@@ -240,6 +281,7 @@ class PhotolysisCalculator:
             air_exo=air.exo_layer_dens,
             o2_exo=o2.exo_layer_dens,
             o2_reaction=o2_reaction,
+            branching_specs=branching_specs,
         )
 
 

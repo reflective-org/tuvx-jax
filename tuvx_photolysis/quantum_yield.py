@@ -22,7 +22,41 @@ __all__ = [
     "TabulatedQuantumYield",
     "TintQuantumYield",
     "clono2_quantum_yield",
+    "hno4_branching_quantum_yield",
+    "clooocl_branching_quantum_yield",
 ]
+
+
+def hno4_branching_quantum_yield(wl_mid, n_levels, channel) -> np.ndarray:
+    """HO2NO2 (HNO4) photolysis branching quantum yield (JPL 19-5, Table 4C-9-2).
+
+    Φ(HO2+NO2) = 0.8 for λ > 200 nm, 0.7 for λ ≤ 200 nm; Φ(OH+NO3) = 1 − Φ(HO2+NO2). Both channels
+    share the HNO4 absorption cross section and partition unity. ``channel`` is ``"HO2+NO2"`` or
+    ``"OH+NO3"``.
+    """
+    wl = np.asarray(wl_mid, dtype=float)
+    ho2no2 = np.where(wl > 200.0, 0.8, 0.7)
+    if channel == "HO2+NO2":
+        phi = ho2no2
+    elif channel == "OH+NO3":
+        phi = 1.0 - ho2no2
+    else:
+        raise ValueError(f"unknown HNO4 branch: {channel}")
+    return np.repeat(phi[None, :], n_levels, axis=0)
+
+
+def clooocl_branching_quantum_yield(wl_mid, n_levels, channel) -> np.ndarray:
+    """ClOOCl (Cl2O2) photolysis branching quantum yield (JPL 19-5, Section F7).
+
+    Φ(Cl+ClOO) = 0.8 at all wavelengths; the remaining 0.2 goes to the 2ClO (+ClO+Cl+O) channel.
+    Both channels share the ClOOCl absorption cross section. ``channel`` is ``"Cl+ClOO"`` or
+    ``"2ClO"``.
+    """
+    wl = np.asarray(wl_mid, dtype=float)
+    val = 0.8 if channel == "Cl+ClOO" else (0.2 if channel == "2ClO" else None)
+    if val is None:
+        raise ValueError(f"unknown ClOOCl branch: {channel}")
+    return np.full((n_levels, wl.size), val)
 
 
 def clono2_quantum_yield(wl_mid, n_levels, branch) -> np.ndarray:
