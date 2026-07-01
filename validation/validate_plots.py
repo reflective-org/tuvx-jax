@@ -26,7 +26,7 @@ import matplotlib.pyplot as plt
 from tuvx_photolysis import PhotolysisCalculator, photolysis
 
 HERE = Path(__file__).resolve().parent
-REPO = HERE.parents[1]
+REPO = HERE.parent  # standalone package root (contains data/, tests/, examples/)
 FIX = REPO / "tests" / "fixtures"
 REF = FIX / "tuv_5_4_no_aerosol_reference.nc"
 LA_SR_MAX_NM = 206.0
@@ -79,7 +79,7 @@ def _plot_radiation_field(wl_mid, altitude, mine, ref, sza):
     ratio = np.where(ref[k] > 0, mine[k] / np.where(ref[k] > 0, ref[k], 1), np.nan)
     ax2.plot(wl_mid, ratio, lw=1.0)
     ax2.axhline(1.0, color="k", lw=0.6)
-    ax2.axvspan(wl_mid[0], LA_SR_MAX_NM, color="red", alpha=0.12, label="LA/SR (deferred)")
+    ax2.axvspan(wl_mid[0], LA_SR_MAX_NM, color="red", alpha=0.12, label="LA/SR bands")
     ax2.set_ylim(0.9, 1.1)
     ax2.set_xlabel("wavelength (nm)")
     ax2.set_ylabel("Python / Fortran")
@@ -121,11 +121,9 @@ def _uv_fraction(calc, flux, wl_mid, name):
 
 def _plot_j_scatter(calc, flux, wl_mid, Jprof, ref_J, ti):
     mine_all, ref_all = [], []
-    for name in calc.xsqy:
+    for name in Jprof:  # all covered reactions (LA/SR ported -> deep-UV included)
         if name not in ref_J:
             continue
-        if _uv_fraction(calc, flux, wl_mid, name) > 1e-4:
-            continue  # exclude LA/SR-limited reactions
         r = ref_J[name][:, ti]
         m = r > r.max() * 1e-3
         mine_all.append(Jprof[name][m])
@@ -138,7 +136,7 @@ def _plot_j_scatter(calc, flux, wl_mid, Jprof, ref_J, ti):
     ax.plot(lim, lim, "k-", lw=1, label="1:1")
     ax.set_xlabel("Fortran J (s$^{-1}$)")
     ax.set_ylabel("Python J (s$^{-1}$)")
-    ax.set_title(f"J: Python vs Fortran, {len(mine_all)} points\n(reactions dominated by λ≥206 nm)")
+    ax.set_title(f"J: Python vs Fortran, {len(mine_all)} points (all covered reactions)")
     ax.legend()
     fig.tight_layout()
     fig.savefig(HERE / "j_scatter.png", dpi=120)
@@ -162,7 +160,7 @@ def _plot_error_vs_uv(calc, flux, wl_mid, Jprof, ref_J, ti):
     ax.set_yscale("log")
     ax.set_xlabel("deep-UV (<206 nm) fraction of J")
     ax.set_ylabel("median |Python−Fortran| / Fortran")
-    ax.set_title("J error is set by the deep-UV (deferred LA/SR) contribution")
+    ax.set_title("With LA/SR bands ported, J error is independent of deep-UV fraction")
     ax.grid(alpha=0.3)
     fig.tight_layout()
     fig.savefig(HERE / "j_error_vs_uv.png", dpi=120)

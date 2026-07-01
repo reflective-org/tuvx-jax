@@ -52,11 +52,17 @@ _ETFL_BIN_EDGES = (0.0, 150.01, 200.07, 1000.99, np.inf)
 
 @dataclass
 class Profile:
-    """A vertical profile on the height grid."""
+    """A vertical profile on the height grid.
+
+    ``layer_dens`` (n_layers) is the per-layer column density with the exospheric top layer folded
+    into the last cell. ``exo_layer_dens`` (n_layers + 1) keeps the per-layer columns *unfolded*
+    plus the exospheric layer as its final element — the form the slant-path ``air_mass`` expects.
+    """
 
     edge_val: np.ndarray  # (n_levels,)
     mid_val: np.ndarray  # (n_layers,)
     layer_dens: np.ndarray | None = None  # (n_layers,) [molecule cm-2]
+    exo_layer_dens: np.ndarray | None = None  # (n_layers + 1,) [molecule cm-2]
 
 
 def _log_interp_density(height_edges_km, prof: AtmosphereProfile):
@@ -67,12 +73,17 @@ def _log_interp_density(height_edges_km, prof: AtmosphereProfile):
 
 
 def _geometric_layer_density(edge_val, delta_km, edge_top, scale_height):
-    """Per-layer column density via the geometric mean of edge densities + exospheric top layer."""
+    """Per-layer column density (geometric mean of edge densities) + exospheric top layer.
+
+    Returns ``(layer_dens, exo_layer_dens)``: ``layer_dens`` has the exospheric layer folded into
+    its last cell; ``exo_layer_dens`` is ``[per-layer columns, exospheric layer]`` (length n+1).
+    """
     layer = delta_km * np.sqrt(edge_val[:-1]) * np.sqrt(edge_val[1:]) * _KM2CM
     exo = edge_top * scale_height * _KM2CM
-    layer = layer.copy()
-    layer[-1] = layer[-1] + exo
-    return layer
+    exo_layer = np.concatenate([layer, [exo]])
+    folded = layer.copy()
+    folded[-1] = folded[-1] + exo
+    return folded, exo_layer
 
 
 def air_profile(height_edges_km, density: AtmosphereProfile, scale_height: float = 8.01) -> Profile:
@@ -81,8 +92,8 @@ def air_profile(height_edges_km, density: AtmosphereProfile, scale_height: float
     delta = np.diff(edges)
     edge_val = _log_interp_density(edges, density)
     mid_val = 0.5 * (edge_val[:-1] + edge_val[1:])
-    layer_dens = _geometric_layer_density(edge_val, delta, edge_val[-1], scale_height)
-    return Profile(edge_val=edge_val, mid_val=mid_val, layer_dens=layer_dens)
+    layer_dens, exo = _geometric_layer_density(edge_val, delta, edge_val[-1], scale_height)
+    return Profile(edge_val=edge_val, mid_val=mid_val, layer_dens=layer_dens, exo_layer_dens=exo)
 
 
 def o2_profile(height_edges_km, density: AtmosphereProfile, scale_height: float = 8.01) -> Profile:
@@ -91,8 +102,8 @@ def o2_profile(height_edges_km, density: AtmosphereProfile, scale_height: float 
     delta = np.diff(edges)
     edge_val = _O2_VMR * _log_interp_density(edges, density)
     mid_val = 0.5 * (edge_val[:-1] + edge_val[1:])
-    layer_dens = _geometric_layer_density(edge_val, delta, edge_val[-1], scale_height)
-    return Profile(edge_val=edge_val, mid_val=mid_val, layer_dens=layer_dens)
+    layer_dens, exo = _geometric_layer_density(edge_val, delta, edge_val[-1], scale_height)
+    return Profile(edge_val=edge_val, mid_val=mid_val, layer_dens=layer_dens, exo_layer_dens=exo)
 
 
 def o3_profile(
@@ -119,21 +130,25 @@ def o3_profile(
     zdata = np.array(zdata)
     prof = np.array(prof)
 
+    def _layers(ev):
+        base = delta * (0.5 * (ev[:-1] + ev[1:])) * _KM2CM
+        exo = ev[-1] * scale_height * _KM2CM
+        folded = base.copy()
+        folded[-1] = folded[-1] + exo
+        return folded, np.concatenate([base, [exo]])
+
     edge_val = interp_linear(edges, zdata, prof)
-    mid_val = 0.5 * (edge_val[:-1] + edge_val[1:])
-    layer_dens = (delta * mid_val * _KM2CM).copy()
-    layer_dens[-1] = layer_dens[-1] + edge_val[-1] * scale_height * _KM2CM
+    layer_dens, exo_layer = _layers(edge_val)
 
     if reference_column_du != 1.0:
         input_du = np.sum(layer_dens) / _DU
         scale = reference_column_du / input_du
         if scale != 1.0:
             edge_val = scale * edge_val
-            mid_val = 0.5 * (edge_val[:-1] + edge_val[1:])
-            layer_dens = (delta * mid_val * _KM2CM).copy()
-            layer_dens[-1] = layer_dens[-1] + edge_val[-1] * scale_height * _KM2CM
+            layer_dens, exo_layer = _layers(edge_val)
 
-    return Profile(edge_val=edge_val, mid_val=mid_val, layer_dens=layer_dens)
+    mid_val = 0.5 * (edge_val[:-1] + edge_val[1:])
+    return Profile(edge_val=edge_val, mid_val=mid_val, layer_dens=layer_dens, exo_layer_dens=exo_layer)
 
 
 def _pad_flux(grid, datav):

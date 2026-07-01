@@ -35,8 +35,9 @@ def calc():
 
 def test_some_reactions_covered(calc):
     assert len(calc.xsqy) > 40  # most base/O3 + constant/tabulated-QY reactions
-    # O2 photolysis is correctly deferred (needs LA/SR)
-    assert any("O2" in name and "needs" in reason for name, reason in calc.skipped_reactions.items())
+    # O2 photolysis is now handled via the Lyman-alpha/Schumann-Runge band parameterization
+    assert calc.o2_reaction is not None
+    assert calc.o2_reaction["name"] == "O2+hv->O+O"
 
 
 def test_j_matches_fortran_for_non_deep_uv_reactions(calc):

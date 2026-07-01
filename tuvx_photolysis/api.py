@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from . import data, cross_section, profiles, radiators, solver, geometry, photolysis, special
+from .la_sr_bands import LaSrBands
 from .quantum_yield import (
     ConstantQuantumYield,
     TabulatedQuantumYield,
@@ -37,21 +38,55 @@ class PhotolysisCalculator:
 
     wl_edges: np.ndarray
     height_edges_km: np.ndarray
-    total_optics: radiators.RadiatorOpticalProps  # accumulated air/O2/O3 (sza-independent)
+    radiator_props: list  # per-radiator RadiatorOpticalProps (air, O2, O3); accumulated per solve
     etfl: np.ndarray  # (n_wl,) per-bin extraterrestrial flux [photon cm-2 s-1]
     surface_albedo: float
     xsqy: dict  # reaction name -> sigma*phi (n_levels, n_wl), sza-independent
+    temperature_edge: np.ndarray  # (n_levels,) [K]
     skipped_reactions: dict = field(default_factory=dict)
+    # Lyman-alpha / Schumann-Runge band handling (SZA-dependent, applied per solve)
+    la_sr: object = None  # LaSrBands or None
+    o2_index: int | None = None  # index of the O2 radiator in radiator_props
+    air_exo: np.ndarray | None = None  # air exospheric layer densities (for slant columns)
+    o2_exo: np.ndarray | None = None  # O2 exospheric layer densities
+    o2_reaction: dict | None = None  # O2 photolysis reaction: {name, sigma_base (n_lev,n_wl), phi}
+
+    def reaction_names(self):
+        names = list(self.xsqy)
+        if self.o2_reaction is not None:
+            names.append(self.o2_reaction["name"])
+        return names
 
     # ---- solving -------------------------------------------------------------------------------
-    def radiation_field(self, solar_zenith_angle_deg: float):
+    def _solve(self, solar_zenith_angle_deg: float):
+        """Return (radiation_field, columns). ``columns`` is (air_vcol, air_scol, o2_scol) or None.
+
+        When the grid includes the LA/SR bands, the O2 radiator optical depth in those bins is
+        replaced by the column-dependent effective values before accumulating and solving.
+        """
         sg = geometry.SphericalGeometry().set_parameters(solar_zenith_angle_deg, self.height_edges_km)
+        rads = list(self.radiator_props)
+        columns = None
+        if self.la_sr is not None and self.la_sr.has_la_srb and self.o2_index is not None:
+            air_vcol, air_scol = sg.air_mass(self.air_exo)
+            _, o2_scol = sg.air_mass(self.o2_exo)
+            o2 = rads[self.o2_index]
+            o2_od = self.la_sr.optical_depth(
+                o2.optical_depth, o2_scol, air_vcol, air_scol, self.temperature_edge
+            )
+            rads[self.o2_index] = radiators.RadiatorOpticalProps(o2_od, 0.0, 0.0, is_air=False)
+            columns = (air_vcol, air_scol, o2_scol)
+        total = radiators.accumulate(rads)
         S, night, valid = solver.build_slant_operator(sg.nid, sg.dsdh)
-        return solver.solve(self.total_optics, solar_zenith_angle_deg, self.surface_albedo, S, night, valid)
+        rf = solver.solve(total, solar_zenith_angle_deg, self.surface_albedo, S, night, valid)
+        return rf, columns
+
+    def radiation_field(self, solar_zenith_angle_deg: float):
+        return self._solve(solar_zenith_angle_deg)[0]
 
     def rate_constants_profile(self, solar_zenith_angle_deg: float, earth_sun_distance: float = 1.0):
         """Return ``{reaction: J[n_levels]}`` (s-1) for the whole column at this solar position."""
-        rf = self.radiation_field(solar_zenith_angle_deg)
+        rf, columns = self._solve(solar_zenith_angle_deg)
         # the Fortran scales the radiation field by the Earth-Sun distance before integrating
         flux = photolysis.actinic_flux(
             np.asarray(rf.fdr) * earth_sun_distance,
@@ -59,7 +94,17 @@ class PhotolysisCalculator:
             np.asarray(rf.fup) * earth_sun_distance,
             self.etfl,
         )
-        return {name: np.sum(flux * sq, axis=1) for name, sq in self.xsqy.items()}
+        out = {name: np.sum(flux * sq, axis=1) for name, sq in self.xsqy.items()}
+        if self.o2_reaction is not None:
+            # O2 photolysis: the LA/SR effective cross section replaces the base in those bins
+            sigma = self.o2_reaction["sigma_base"]
+            if columns is not None and self.la_sr is not None:
+                air_vcol, air_scol, o2_scol = columns
+                sigma = self.la_sr.cross_section(
+                    sigma, o2_scol, air_vcol, air_scol, self.temperature_edge
+                )
+            out[self.o2_reaction["name"]] = np.sum(flux * sigma * self.o2_reaction["phi"], axis=1)
+        return out
 
     def rate_constants(
         self,
@@ -80,9 +125,8 @@ class PhotolysisCalculator:
         """
         sza = geometry.solar_zenith_angle(year, month, day, utc_hour, latitude, longitude)
         if sza >= 90.0:
-            levels = self.height_edges_km.size
-            zero = np.zeros(levels)
-            prof = {name: zero.copy() for name in self.xsqy}
+            zero = np.zeros(self.height_edges_km.size)
+            prof = {name: zero.copy() for name in self.reaction_names()}
         else:
             esd = geometry.earth_sun_distance(year, month, day, utc_hour)
             prof = self.rate_constants_profile(sza, esd)
@@ -132,10 +176,15 @@ class PhotolysisCalculator:
         ]
         etfl = profiles.extraterrestrial_flux(wl_edges, flux_files)
 
-        # --- radiators (radiative transfer block) ---
+        # --- Lyman-alpha / Schumann-Runge band parameterization (O2), if configured ---
+        o2_params = (cfg.get("O2 absorption") or {}).get("cross section parameters file")
+        la_sr = LaSrBands.from_file(wl_edges, rel(o2_params)) if o2_params else None
+
+        # --- radiators (radiative transfer block), kept separate for per-solve LA/SR ---
         rt = cfg["radiative transfer"]
         xs_by_name = {x["name"]: x for x in rt["cross sections"]}
         rad_list = []
+        o2_index = None
         for r in rt["radiators"]:
             xs = xs_by_name[r["cross section"]]
             if r.get("treat as air") or xs.get("type") == "air":
@@ -146,24 +195,32 @@ class PhotolysisCalculator:
             elif xs.get("type") == "base":
                 base = _build_base_xs(xs, rel, wl_edges).evaluate(n_lay)
                 dens_prof = o2.layer_dens if r["name"] == "O2" else air.layer_dens
+                if r["name"] == "O2":
+                    o2_index = len(rad_list)
                 rad_list.append(radiators.absorber_radiator(dens_prof, base))
             else:
                 raise ValueError(f"unsupported radiator cross section type: {xs.get('type')}")
-        total_optics = radiators.accumulate(rad_list)
 
         # --- reactions: precompute sigma * phi at interfaces (sza-independent) ---
         xsqy = {}
         skipped = {}
+        o2_reaction = None
         for rxn in cfg.get("photolysis", {}).get("reactions", []):
             name = rxn["name"]
             xs = rxn["cross section"]
             qy = rxn["quantum yield"]
-            if xs.get("apply O2 bands"):
-                skipped[name] = "needs Lyman-alpha/Schumann-Runge bands (deferred)"
-                continue
             try:
-                sigma = _eval_reaction_xs(xs, rel, wl_edges, wl_mid, temperature, n_lev)
                 phi = _eval_reaction_qy(qy, rel, wl_edges, wl_mid, temperature, n_lev, wl_mid.size)
+                if xs.get("apply O2 bands"):
+                    # O2 photolysis: LA/SR effective cross section is applied per solve, so keep the
+                    # base cross section and quantum yield separately rather than a fixed sigma*phi.
+                    if la_sr is None or not la_sr.has_la_srb:
+                        skipped[name] = "needs Lyman-alpha/Schumann-Runge bands (not configured)"
+                        continue
+                    sigma_base = _eval_reaction_xs(xs, rel, wl_edges, wl_mid, temperature, n_lev)
+                    o2_reaction = {"name": name, "sigma_base": sigma_base, "phi": phi}
+                    continue
+                sigma = _eval_reaction_xs(xs, rel, wl_edges, wl_mid, temperature, n_lev)
             except _Unsupported as exc:
                 skipped[name] = str(exc)
                 continue
@@ -172,11 +229,17 @@ class PhotolysisCalculator:
         return cls(
             wl_edges=wl_edges,
             height_edges_km=height_edges,
-            total_optics=total_optics,
+            radiator_props=rad_list,
             etfl=etfl,
             surface_albedo=surface_albedo,
             xsqy=xsqy,
+            temperature_edge=temperature.edge_val,
             skipped_reactions=skipped,
+            la_sr=la_sr,
+            o2_index=o2_index,
+            air_exo=air.exo_layer_dens,
+            o2_exo=o2.exo_layer_dens,
+            o2_reaction=o2_reaction,
         )
 
 
