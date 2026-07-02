@@ -126,13 +126,23 @@ class PhotolysisCalculator:
         output faithful to the Fortran TUV-x (single channel with unit quantum yield).
         """
         rf, columns = self._solve(solar_zenith_angle_deg)
-        # the Fortran scales the radiation field by the Earth-Sun distance before integrating
-        flux = photolysis.actinic_flux(
+        flux = self._actinic_flux(rf, earth_sun_distance)
+        return self._j_profiles(flux, columns, branching)
+
+    def _actinic_flux(self, rf, earth_sun_distance):
+        """Actinic flux ``(n_levels, n_wl)`` [photon cm-2 s-1] from a solved radiation field.
+
+        The Fortran scales the radiation field by the Earth-Sun distance before integrating.
+        """
+        return photolysis.actinic_flux(
             np.asarray(rf.fdr) * earth_sun_distance,
             np.asarray(rf.fdn) * earth_sun_distance,
             np.asarray(rf.fup) * earth_sun_distance,
             self.etfl,
         )
+
+    def _j_profiles(self, flux, columns, branching):
+        """``{reaction: J[n_levels]}`` from an actinic flux (see :meth:`rate_constants_profile`)."""
         out = {name: np.sum(flux * sq, axis=1) for name, sq in self.xsqy.items()}
         if self.o2_reaction is not None:
             # O2 photolysis: the LA/SR effective cross section replaces the base in those bins
@@ -148,6 +158,17 @@ class PhotolysisCalculator:
                 out[name] = np.sum(flux * sq, axis=1)  # overrides primary, adds secondary channels
         return out
 
+    def _heating_profiles(self, flux):
+        """``{reaction: heating[n_levels]}`` from an actinic flux (see :meth:`heating_and_actinic_flux`)."""
+        wl_mid = 0.5 * (self.wl_edges[:-1] + self.wl_edges[1:])
+        heating = {}
+        for name, e_thr in _HEATING_ENERGY_TERMS_NM.items():
+            if name not in self.xsqy:
+                continue
+            energy = np.maximum(0.0, _HC_J_M * 1.0e9 * (e_thr - wl_mid) / (e_thr * wl_mid))  # (n_wl,) [J]
+            heating[name] = np.sum(flux * (energy[None, :] * self.xsqy[name]), axis=1)
+        return heating
+
     def heating_and_actinic_flux(self, solar_zenith_angle_deg: float, earth_sun_distance: float = 1.0):
         """One radiation solve -> ``(heating, actinic_flux)``.
 
@@ -161,20 +182,21 @@ class PhotolysisCalculator:
         volumetric rate.
         """
         rf, _columns = self._solve(solar_zenith_angle_deg)
-        flux = photolysis.actinic_flux(
-            np.asarray(rf.fdr) * earth_sun_distance,
-            np.asarray(rf.fdn) * earth_sun_distance,
-            np.asarray(rf.fup) * earth_sun_distance,
-            self.etfl,
-        )
-        wl_mid = 0.5 * (self.wl_edges[:-1] + self.wl_edges[1:])
-        heating = {}
-        for name, e_thr in _HEATING_ENERGY_TERMS_NM.items():
-            if name not in self.xsqy:
-                continue
-            energy = np.maximum(0.0, _HC_J_M * 1.0e9 * (e_thr - wl_mid) / (e_thr * wl_mid))  # (n_wl,) [J]
-            heating[name] = np.sum(flux * (energy[None, :] * self.xsqy[name]), axis=1)
-        return heating, flux
+        flux = self._actinic_flux(rf, earth_sun_distance)
+        return self._heating_profiles(flux), flux
+
+    def rates_heating_and_actinic_flux(
+        self, solar_zenith_angle_deg: float, earth_sun_distance: float = 1.0, branching: bool = False
+    ):
+        """ONE radiation solve -> ``(J_profiles, heating, actinic_flux)``.
+
+        Identical to calling :meth:`rate_constants_profile` and :meth:`heating_and_actinic_flux`
+        separately (same radiation field, same flux), but pays for the solve once -- for callers that
+        need photolysis AND heating at the same solar position (the coupled driver's outer step).
+        """
+        rf, columns = self._solve(solar_zenith_angle_deg)
+        flux = self._actinic_flux(rf, earth_sun_distance)
+        return self._j_profiles(flux, columns, branching), self._heating_profiles(flux), flux
 
     def heating_rate_profile(self, solar_zenith_angle_deg: float, earth_sun_distance: float = 1.0):
         """``{reaction: heating[n_levels]}`` [J s-1 per absorber molecule] (see

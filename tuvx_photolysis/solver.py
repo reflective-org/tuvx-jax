@@ -242,6 +242,14 @@ def _solve_one_wavelength(tauu, omu, gu, rsfc, S, mu, night_level, layer_nid_val
     return (fdr[::-1], fdn[::-1], fup[::-1], edr[::-1], eup[::-1], edn[::-1])
 
 
+# Built ONCE at module level and jit-compiled: a per-call `jax.vmap(...)` closure defeats the
+# compile cache (the eager `lax.scan`s inside recompile on every call -- ~90 ms/solve vs <1 ms
+# compiled). `mu` is a traced scalar, so different solar positions reuse the same compilation.
+_SOLVE_VMAP = jax.jit(
+    jax.vmap(_solve_one_wavelength, in_axes=(0, 0, 0, 0, None, None, None, None))
+)
+
+
 def solve_arrays(od, ssa, g, mu, rsfc, S, night_level, layer_nid_valid) -> RadiationField:
     """Pure-array, jit/grad-friendly core. All arrays are JAX arrays.
 
@@ -254,10 +262,7 @@ def solve_arrays(od, ssa, g, mu, rsfc, S, night_level, layer_nid_valid) -> Radia
     omu = ssa[::-1, :].T
     gu = g[::-1, :].T
 
-    solve_vmap = jax.vmap(
-        _solve_one_wavelength, in_axes=(0, 0, 0, 0, None, None, None, None)
-    )
-    fdr, fdn, fup, edr, eup, edn = solve_vmap(
+    fdr, fdn, fup, edr, eup, edn = _SOLVE_VMAP(
         tauu, omu, gu, rsfc, S, mu, night_level, layer_nid_valid
     )
     # vmap stacks along axis 0 (wavelength); transpose to (n_levels, n_wavelengths)
