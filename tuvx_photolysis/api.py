@@ -148,14 +148,17 @@ class PhotolysisCalculator:
                 out[name] = np.sum(flux * sq, axis=1)  # overrides primary, adds secondary channels
         return out
 
-    def heating_rate_profile(self, solar_zenith_angle_deg: float, earth_sun_distance: float = 1.0):
-        """Return ``{reaction: heating[n_levels]}`` [J s-1 per absorber molecule] for the reactions
-        with a photochemical-heating energy term (O3 channels; O2 deferred, AD-5.1).
+    def heating_and_actinic_flux(self, solar_zenith_angle_deg: float, earth_sun_distance: float = 1.0):
+        """One radiation solve -> ``(heating, actinic_flux)``.
 
-        Ports ``heating_rates.F90``: ``energy(λ) = max(0, hc·(1/λ − 1/λ_threshold))`` [J] and
-        ``heating(z) = Σ_λ actinic(λ,z)·energy(λ)·σφ(λ,z)``. Reuses the SAME actinic flux and channel
-        σφ (``xsqy``) that ``rate_constants_profile`` uses, so photolysis and heating are consistent.
-        Multiply by the absorber number density (e.g. [O3]) to get a volumetric heating rate.
+        ``heating`` is ``{reaction: heating[n_levels]}`` [J s-1 per absorber molecule] for the reactions
+        with a photochemical-heating energy term (O3 channels; O2 deferred, AD-5.1). ``actinic_flux`` is
+        the ``(n_levels, n_wl)`` flux [photon cm-2 s-1] (fdr+fdn+fup)*etfl, so callers can also form the
+        aerosol shortwave-absorption heating (Σ_λ flux·b_abs·E_photon) from the same solve. Ports
+        ``heating_rates.F90``: ``energy(λ)=max(0, hc(1/λ − 1/λ_threshold))``,
+        ``heating(z)=Σ_λ actinic(λ,z)·energy(λ)·σφ(λ,z)``, reusing the SAME actinic flux + channel σφ as
+        ``rate_constants_profile`` (photolysis and heating consistent). Multiply by [absorber] for a
+        volumetric rate.
         """
         rf, _columns = self._solve(solar_zenith_angle_deg)
         flux = photolysis.actinic_flux(
@@ -165,13 +168,18 @@ class PhotolysisCalculator:
             self.etfl,
         )
         wl_mid = 0.5 * (self.wl_edges[:-1] + self.wl_edges[1:])
-        out = {}
+        heating = {}
         for name, e_thr in _HEATING_ENERGY_TERMS_NM.items():
             if name not in self.xsqy:
                 continue
             energy = np.maximum(0.0, _HC_J_M * 1.0e9 * (e_thr - wl_mid) / (e_thr * wl_mid))  # (n_wl,) [J]
-            out[name] = np.sum(flux * (energy[None, :] * self.xsqy[name]), axis=1)
-        return out
+            heating[name] = np.sum(flux * (energy[None, :] * self.xsqy[name]), axis=1)
+        return heating, flux
+
+    def heating_rate_profile(self, solar_zenith_angle_deg: float, earth_sun_distance: float = 1.0):
+        """``{reaction: heating[n_levels]}`` [J s-1 per absorber molecule] (see
+        :meth:`heating_and_actinic_flux`, which this wraps)."""
+        return self.heating_and_actinic_flux(solar_zenith_angle_deg, earth_sun_distance)[0]
 
     def rate_constants(
         self,
