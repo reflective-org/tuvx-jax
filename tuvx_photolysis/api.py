@@ -37,6 +37,17 @@ from .quantum_yield import (
 
 __all__ = ["PhotolysisCalculator"]
 
+#: Planck constant x speed of light [J m] -- matches tuv-x src/constants.F90 hc (and profiles._HC).
+_HC_J_M = 6.626068e-34 * 2.99792458e8
+
+#: Photochemical-heating energy terms (threshold wavelength [nm]) per reaction, from ts1_tsmlt.json's
+#: heating config. O3 both channels (Hartley/Huggins O1D + Chappuis/Huggins O3P). O2 (jo2) deferred --
+#: it needs the LA/SR-corrected cross section and is minor at ~19 km (AD-5.1).
+_HEATING_ENERGY_TERMS_NM = {
+    "O3+hv->O2+O(1D)": 310.32,
+    "O3+hv->O2+O(3P)": 1179.87,
+}
+
 
 @dataclass
 class PhotolysisCalculator:
@@ -135,6 +146,31 @@ class PhotolysisCalculator:
         if branching:
             for name, sq in self.branching_specs.items():
                 out[name] = np.sum(flux * sq, axis=1)  # overrides primary, adds secondary channels
+        return out
+
+    def heating_rate_profile(self, solar_zenith_angle_deg: float, earth_sun_distance: float = 1.0):
+        """Return ``{reaction: heating[n_levels]}`` [J s-1 per absorber molecule] for the reactions
+        with a photochemical-heating energy term (O3 channels; O2 deferred, AD-5.1).
+
+        Ports ``heating_rates.F90``: ``energy(λ) = max(0, hc·(1/λ − 1/λ_threshold))`` [J] and
+        ``heating(z) = Σ_λ actinic(λ,z)·energy(λ)·σφ(λ,z)``. Reuses the SAME actinic flux and channel
+        σφ (``xsqy``) that ``rate_constants_profile`` uses, so photolysis and heating are consistent.
+        Multiply by the absorber number density (e.g. [O3]) to get a volumetric heating rate.
+        """
+        rf, _columns = self._solve(solar_zenith_angle_deg)
+        flux = photolysis.actinic_flux(
+            np.asarray(rf.fdr) * earth_sun_distance,
+            np.asarray(rf.fdn) * earth_sun_distance,
+            np.asarray(rf.fup) * earth_sun_distance,
+            self.etfl,
+        )
+        wl_mid = 0.5 * (self.wl_edges[:-1] + self.wl_edges[1:])
+        out = {}
+        for name, e_thr in _HEATING_ENERGY_TERMS_NM.items():
+            if name not in self.xsqy:
+                continue
+            energy = np.maximum(0.0, _HC_J_M * 1.0e9 * (e_thr - wl_mid) / (e_thr * wl_mid))  # (n_wl,) [J]
+            out[name] = np.sum(flux * (energy[None, :] * self.xsqy[name]), axis=1)
         return out
 
     def rate_constants(
