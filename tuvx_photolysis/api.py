@@ -60,6 +60,11 @@ class PhotolysisCalculator:
     # split HNO4 / ClOOCl photolysis into their product channels using the JPL branching quantum
     # yields; they are NOT Fortran-comparable (TUV-x carries only one channel each).
     branching_specs: dict = field(default_factory=dict)
+    #: Optional dynamic aerosol radiator (RadiatorOpticalProps, shape (n_layers, n_wl)), injected per
+    #: solve. Set by the coupled driver from the TOMAS aerosol (Phase 4, aerosol->photolysis); None ->
+    #: no aerosol (identical to the pre-Phase-4 solve). Kept as mutable state so the coupled loop can
+    #: update it each outer step without rebuilding the (cached) calculator.
+    aerosol_props: object = None
 
     def reaction_names(self, branching: bool = False):
         names = list(self.xsqy)
@@ -89,6 +94,8 @@ class PhotolysisCalculator:
             )
             rads[self.o2_index] = radiators.RadiatorOpticalProps(o2_od, 0.0, 0.0, is_air=False)
             columns = (air_vcol, air_scol, o2_scol)
+        if self.aerosol_props is not None:      # Phase 4: dynamic aerosol -> photolysis feedback
+            rads.append(self.aerosol_props)
         total = radiators.accumulate(rads)
         S, night, valid = solver.build_slant_operator(sg.nid, sg.dsdh)
         rf = solver.solve(total, solar_zenith_angle_deg, self.surface_albedo, S, night, valid)
