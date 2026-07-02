@@ -410,6 +410,8 @@ def _eval_reaction_xs(xs_cfg, rel, wl_edges, wl_mid, temperature, n_lev):
         return special.N2O5CrossSection.from_files(tds[0], tds[1], wl_edges).evaluate(Te)
     if t == "ClONO2":
         return special.ClONO2CrossSection.from_file(_tds(xs_cfg, rel)[0], wl_edges).evaluate(Te)
+    if t == "H2O2+hv->OH+OH":
+        return special.H2O2CrossSection.from_file(_tds(xs_cfg, rel)[0], wl_edges).evaluate(Te)
     if t == "NO2 tint":
         return special.TintCrossSection.from_files(_tds(xs_cfg, rel), wl_edges).evaluate(Te)
     if t == "OClO+hv->Products":
