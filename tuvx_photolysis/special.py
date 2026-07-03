@@ -13,6 +13,8 @@ per-level temperature [K]:
   with ``Tadj`` clamped to [233, 300] (n2o5-no2_no3.F90).
 * :class:`ClONO2CrossSection` -- ClONO2: Taylor series ``c1*(1 + dT*(c2 + dT*c3))``, ``dT = T-296``
   (clono2.F90).
+* :class:`H2O2CrossSection` -- H2O2: JPL94 temperature-dependent form over [260, 350) nm, base
+  tabulated data elsewhere (h2o2-oh_oh.F90).
 * :class:`TintCrossSection`  -- generic temperature interpolation, one or more files each with a
   temperature axis (no2_tint.F90); linear-in-T == ``numpy.interp``.
 * :class:`OCloCrossSection`  -- OClO: each file is one temperature node, interpolated across files.
@@ -32,9 +34,15 @@ __all__ = [
     "HNO3CrossSection",
     "N2O5CrossSection",
     "ClONO2CrossSection",
+    "H2O2CrossSection",
     "TintCrossSection",
     "OCloCrossSection",
 ]
+
+# JPL94 H2O2 cross-section polynomial coefficients (h2o2-oh_oh.F90), highest power first for np.polyval.
+_H2O2_A = np.array([1.5534675e-13, -2.652014e-10, 1.6878206e-07, -4.035101e-05,
+                    -4.4589016e-03, 4.535649, -9.2170972e02, 6.4761e04])
+_H2O2_B = np.array([-1.0924e-07, -3.0493e-05, 1.1522e-01, -5.1351e01, 6.8123e03])
 
 
 def cl2_cross_section(wl_mid, temperature) -> np.ndarray:
@@ -123,6 +131,42 @@ class ClONO2CrossSection:
         dT = np.asarray(temperature, dtype=float)[:, None] - 296.0
         c1, c2, c3 = self.c[None, :, 0], self.c[None, :, 1], self.c[None, :, 2]
         return c1 * (1.0 + dT * (c2 + dT * c3))
+
+
+@dataclass
+class H2O2CrossSection:
+    """H2O2 -> OH + OH cross section [cm^2] (ports h2o2-oh_oh.F90).
+
+    JPL94 parameterization over [260, 350) nm; the base tabulated cross section elsewhere. Matching
+    the Fortran exactly: the band is selected by each wavelength cell's LOWER edge, the polynomials
+    ``sumA``/``sumB`` are evaluated at the cell MIDPOINT, and the temperature is clamped to [200, 400] K:
+
+        chi = 1 / (1 + exp(-1265 / T))
+        sigma = (chi * sumA + (1 - chi) * sumB) * 1e-21   for 260 <= lower_edge < 350 nm
+        sigma = base(lambda)                              otherwise
+    """
+
+    base: np.ndarray  # (n_wl,) base tabulated cross section
+    wl_mid: np.ndarray  # (n_wl,) wavelength-cell midpoints [nm]
+    band: np.ndarray  # (n_wl,) bool: cells with 260 <= lower_edge < 350 nm
+
+    @classmethod
+    def from_file(cls, td, wl_edges, lower_extrap=None, upper_extrap=None):
+        base = _rebin_param(td.wavelength, td.parameters[:, 0], wl_edges, lower_extrap, upper_extrap)
+        wl_edges = np.asarray(wl_edges, dtype=float)
+        wl_mid = 0.5 * (wl_edges[:-1] + wl_edges[1:])
+        band = (wl_edges[:-1] >= 260.0) & (wl_edges[:-1] < 350.0)  # branch on the cell's lower edge
+        return cls(base=base, wl_mid=wl_mid, band=band)
+
+    def evaluate(self, temperature) -> np.ndarray:
+        T = np.clip(np.asarray(temperature, dtype=float), 200.0, 400.0)  # (n_levels,)
+        sumA = np.polyval(_H2O2_A, self.wl_mid)  # (n_wl,)
+        sumB = np.polyval(_H2O2_B, self.wl_mid)
+        chi = 1.0 / (1.0 + np.exp(-1265.0 / T))  # (n_levels,)
+        param = (chi[:, None] * sumA[None, :] + (1.0 - chi)[:, None] * sumB[None, :]) * 1.0e-21
+        out = np.repeat(self.base[None, :], T.size, axis=0)  # (n_levels, n_wl)
+        out[:, self.band] = param[:, self.band]
+        return out
 
 
 def _reverse_if_descending(temps, cols):

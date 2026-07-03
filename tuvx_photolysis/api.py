@@ -37,6 +37,17 @@ from .quantum_yield import (
 
 __all__ = ["PhotolysisCalculator"]
 
+#: Planck constant x speed of light [J m] -- matches tuv-x src/constants.F90 hc (and profiles._HC).
+_HC_J_M = 6.626068e-34 * 2.99792458e8
+
+#: Photochemical-heating energy terms (threshold wavelength [nm]) per reaction, from ts1_tsmlt.json's
+#: heating config. O3 both channels (Hartley/Huggins O1D + Chappuis/Huggins O3P). O2 (jo2) deferred --
+#: it needs the LA/SR-corrected cross section and is minor at ~19 km (AD-5.1).
+_HEATING_ENERGY_TERMS_NM = {
+    "O3+hv->O2+O(1D)": 310.32,
+    "O3+hv->O2+O(3P)": 1179.87,
+}
+
 
 @dataclass
 class PhotolysisCalculator:
@@ -60,6 +71,11 @@ class PhotolysisCalculator:
     # split HNO4 / ClOOCl photolysis into their product channels using the JPL branching quantum
     # yields; they are NOT Fortran-comparable (TUV-x carries only one channel each).
     branching_specs: dict = field(default_factory=dict)
+    #: Optional dynamic aerosol radiator (RadiatorOpticalProps, shape (n_layers, n_wl)), injected per
+    #: solve. Set by the coupled driver from the TOMAS aerosol (Phase 4, aerosol->photolysis); None ->
+    #: no aerosol (identical to the pre-Phase-4 solve). Kept as mutable state so the coupled loop can
+    #: update it each outer step without rebuilding the (cached) calculator.
+    aerosol_props: object = None
 
     def reaction_names(self, branching: bool = False):
         names = list(self.xsqy)
@@ -89,6 +105,8 @@ class PhotolysisCalculator:
             )
             rads[self.o2_index] = radiators.RadiatorOpticalProps(o2_od, 0.0, 0.0, is_air=False)
             columns = (air_vcol, air_scol, o2_scol)
+        if self.aerosol_props is not None:      # Phase 4: dynamic aerosol -> photolysis feedback
+            rads.append(self.aerosol_props)
         total = radiators.accumulate(rads)
         S, night, valid = solver.build_slant_operator(sg.nid, sg.dsdh)
         rf = solver.solve(total, solar_zenith_angle_deg, self.surface_albedo, S, night, valid)
@@ -108,13 +126,23 @@ class PhotolysisCalculator:
         output faithful to the Fortran TUV-x (single channel with unit quantum yield).
         """
         rf, columns = self._solve(solar_zenith_angle_deg)
-        # the Fortran scales the radiation field by the Earth-Sun distance before integrating
-        flux = photolysis.actinic_flux(
+        flux = self._actinic_flux(rf, earth_sun_distance)
+        return self._j_profiles(flux, columns, branching)
+
+    def _actinic_flux(self, rf, earth_sun_distance):
+        """Actinic flux ``(n_levels, n_wl)`` [photon cm-2 s-1] from a solved radiation field.
+
+        The Fortran scales the radiation field by the Earth-Sun distance before integrating.
+        """
+        return photolysis.actinic_flux(
             np.asarray(rf.fdr) * earth_sun_distance,
             np.asarray(rf.fdn) * earth_sun_distance,
             np.asarray(rf.fup) * earth_sun_distance,
             self.etfl,
         )
+
+    def _j_profiles(self, flux, columns, branching):
+        """``{reaction: J[n_levels]}`` from an actinic flux (see :meth:`rate_constants_profile`)."""
         out = {name: np.sum(flux * sq, axis=1) for name, sq in self.xsqy.items()}
         if self.o2_reaction is not None:
             # O2 photolysis: the LA/SR effective cross section replaces the base in those bins
@@ -129,6 +157,51 @@ class PhotolysisCalculator:
             for name, sq in self.branching_specs.items():
                 out[name] = np.sum(flux * sq, axis=1)  # overrides primary, adds secondary channels
         return out
+
+    def _heating_profiles(self, flux):
+        """``{reaction: heating[n_levels]}`` from an actinic flux (see :meth:`heating_and_actinic_flux`)."""
+        wl_mid = 0.5 * (self.wl_edges[:-1] + self.wl_edges[1:])
+        heating = {}
+        for name, e_thr in _HEATING_ENERGY_TERMS_NM.items():
+            if name not in self.xsqy:
+                continue
+            energy = np.maximum(0.0, _HC_J_M * 1.0e9 * (e_thr - wl_mid) / (e_thr * wl_mid))  # (n_wl,) [J]
+            heating[name] = np.sum(flux * (energy[None, :] * self.xsqy[name]), axis=1)
+        return heating
+
+    def heating_and_actinic_flux(self, solar_zenith_angle_deg: float, earth_sun_distance: float = 1.0):
+        """One radiation solve -> ``(heating, actinic_flux)``.
+
+        ``heating`` is ``{reaction: heating[n_levels]}`` [J s-1 per absorber molecule] for the reactions
+        with a photochemical-heating energy term (O3 channels; O2 deferred, AD-5.1). ``actinic_flux`` is
+        the ``(n_levels, n_wl)`` flux [photon cm-2 s-1] (fdr+fdn+fup)*etfl, so callers can also form the
+        aerosol shortwave-absorption heating (Σ_λ flux·b_abs·E_photon) from the same solve. Ports
+        ``heating_rates.F90``: ``energy(λ)=max(0, hc(1/λ − 1/λ_threshold))``,
+        ``heating(z)=Σ_λ actinic(λ,z)·energy(λ)·σφ(λ,z)``, reusing the SAME actinic flux + channel σφ as
+        ``rate_constants_profile`` (photolysis and heating consistent). Multiply by [absorber] for a
+        volumetric rate.
+        """
+        rf, _columns = self._solve(solar_zenith_angle_deg)
+        flux = self._actinic_flux(rf, earth_sun_distance)
+        return self._heating_profiles(flux), flux
+
+    def rates_heating_and_actinic_flux(
+        self, solar_zenith_angle_deg: float, earth_sun_distance: float = 1.0, branching: bool = False
+    ):
+        """ONE radiation solve -> ``(J_profiles, heating, actinic_flux)``.
+
+        Identical to calling :meth:`rate_constants_profile` and :meth:`heating_and_actinic_flux`
+        separately (same radiation field, same flux), but pays for the solve once -- for callers that
+        need photolysis AND heating at the same solar position (the coupled driver's outer step).
+        """
+        rf, columns = self._solve(solar_zenith_angle_deg)
+        flux = self._actinic_flux(rf, earth_sun_distance)
+        return self._j_profiles(flux, columns, branching), self._heating_profiles(flux), flux
+
+    def heating_rate_profile(self, solar_zenith_angle_deg: float, earth_sun_distance: float = 1.0):
+        """``{reaction: heating[n_levels]}`` [J s-1 per absorber molecule] (see
+        :meth:`heating_and_actinic_flux`, which this wraps)."""
+        return self.heating_and_actinic_flux(solar_zenith_angle_deg, earth_sun_distance)[0]
 
     def rate_constants(
         self,
@@ -337,6 +410,8 @@ def _eval_reaction_xs(xs_cfg, rel, wl_edges, wl_mid, temperature, n_lev):
         return special.N2O5CrossSection.from_files(tds[0], tds[1], wl_edges).evaluate(Te)
     if t == "ClONO2":
         return special.ClONO2CrossSection.from_file(_tds(xs_cfg, rel)[0], wl_edges).evaluate(Te)
+    if t == "H2O2+hv->OH+OH":
+        return special.H2O2CrossSection.from_file(_tds(xs_cfg, rel)[0], wl_edges).evaluate(Te)
     if t == "NO2 tint":
         return special.TintCrossSection.from_files(_tds(xs_cfg, rel), wl_edges).evaluate(Te)
     if t == "OClO+hv->Products":
