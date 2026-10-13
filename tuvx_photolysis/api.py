@@ -37,6 +37,8 @@ from .quantum_yield import (
     ch2o_h2_co_quantum_yield,
     ch3coch2ch3_quantum_yield,
     ch3cocho_quantum_yield,
+    mvk_quantum_yield,
+    acetone_quantum_yield,
 )
 
 __all__ = ["PhotolysisCalculator"]
@@ -51,6 +53,12 @@ _HEATING_ENERGY_TERMS_NM = {
     "O3+hv->O2+O(1D)": 310.32,
     "O3+hv->O2+O(3P)": 1179.87,
 }
+
+#: Config options of the acetone quantum yield (acetone-ch3co_ch3.F90), passed as keyword arguments.
+_ACETONE_QY_OPTIONS = (
+    "low wavelength value", "high wavelength value", "minimum temperature", "maximum temperature",
+    "branch",
+)
 
 
 @dataclass
@@ -461,6 +469,8 @@ def _eval_reaction_xs(xs_cfg, rel, wl_edges, wl_mid, temperature, n_lev):
         return special.HNO3CrossSection.from_file(td, wl_edges, b_extrap=None).evaluate(Te)
     if t == "CH3COCH2(ONO2)+hv->CH3COCH2(O.)+NO2":
         return special.nitroxy_acetone_cross_section(wl_mid, n_lev)
+    if t == "CH3COCH3+hv->CH3CO+CH3":
+        return special.AcetoneCrossSection.from_file(_tds_no_options(xs_cfg, rel)[0], wl_edges).evaluate(Te)
     raise _Unsupported(f"cross section type '{t}' not ported")
 
 
@@ -478,6 +488,11 @@ def _eval_reaction_qy(qy_cfg, rel, wl_edges, wl_mid, temperature, air_density_ed
         return ch3coch2ch3_quantum_yield(air_density_edge, n_wl)
     if t == "CH3COCHO+hv->CH3CO+HCO":
         return ch3cocho_quantum_yield(wl_mid, air_density_edge)
+    if t == "MVK+hv->Products":
+        return mvk_quantum_yield(wl_mid, air_density_edge)
+    if t == "CH3COCH3+hv->CH3CO+CH3":
+        opts = {key.replace(" ", "_"): qy_cfg[key] for key in _ACETONE_QY_OPTIONS if key in qy_cfg}
+        return acetone_quantum_yield(wl_mid, temperature.edge_val, air_density_edge, **opts)
     if t == "O3+hv->O2+O(1D)":
         return o3_o1d_quantum_yield(wl_mid, temperature.edge_val)
     if t == "O3+hv->O2+O(3P)":

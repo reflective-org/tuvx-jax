@@ -49,6 +49,8 @@ REACTIONS = [
     "nitro_acetone+hv->Products",        # nitroxy_acetone analytic xs
     "CH3COCH2CH3+hv->CH3CO+CH2CH3",      # base xs + MEK pressure-dependent QY
     "CH3COCHO+hv->CH3CO+HCO",            # base xs + methylglyoxal quenched QY
+    "MVK+hv->Products",                  # base xs + MVK total QY
+    "CH3COCH3+hv->CH3CO+CH3",            # acetone T-cubic xs + Blitz et al. (2004) QY
 ]
 
 
@@ -181,3 +183,31 @@ def test_methylglyoxal_quantum_yield_regimes():
     assert phi[0, 1] == 1.0
     kq = 1.36e8 * np.exp(-8793.0 / 410.0)
     assert phi[1, 1] == pytest.approx(0.5 / (0.5 + kq * 760.0), rel=1e-12)
+
+
+def test_mvk_quantum_yield_regimes():
+    from tuvx_photolysis.quantum_yield import mvk_quantum_yield
+
+    phi = mvk_quantum_yield(np.array([200.0, 308.0, 350.0]), np.array([0.0, 2.5e19]))
+    np.testing.assert_array_equal(phi[:, 0], 1.0)  # capped at 1
+    np.testing.assert_allclose(phi[:, 1], [1.0 / 5.5, 1.0 / (5.5 + 9.2e-19 * 2.5e19)], rtol=1e-14)
+    assert np.all(phi[:, 2] < phi[:, 1])  # decays with wavelength
+
+
+def test_acetone_quantum_yield_branches():
+    from tuvx_photolysis.quantum_yield import acetone_quantum_yield
+
+    wl = np.array([270.0, 285.0, 310.0, 330.0])  # below, both CH3CO forms, above the 279-327 range
+    T, M = np.array([220.0, 298.0]), np.array([1.0e18, 2.5e19])
+    ch3co = acetone_quantum_yield(wl, T, M)
+    co = acetone_quantum_yield(wl, T, M, branch="CO")
+    both = acetone_quantum_yield(wl, T, M, branch="CO+CH3CO")
+    np.testing.assert_array_equal(ch3co[:, 0], 0.95)  # low wavelength value (default)
+    np.testing.assert_array_equal(ch3co[:, 3], 0.0)   # high wavelength value (default)
+    np.testing.assert_allclose(both[:, 1:3], co[:, 1:3] + ch3co[:, 1:3], rtol=1e-14)
+    assert np.all((ch3co[:, 1:3] > 0.0) & (both[:, 1:3] <= 1.0))
+    # config options are honoured
+    opt = acetone_quantum_yield(wl, T, M, low_wavelength_value=0.5, high_wavelength_value=0.1)
+    np.testing.assert_array_equal(opt[:, [0, 3]], [[0.5, 0.1], [0.5, 0.1]])
+    with pytest.raises(ValueError):
+        acetone_quantum_yield(wl, T, M, branch="CH3")

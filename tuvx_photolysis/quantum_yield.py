@@ -36,6 +36,8 @@ __all__ = [
     "ch2o_h2_co_quantum_yield",
     "ch3coch2ch3_quantum_yield",
     "ch3cocho_quantum_yield",
+    "mvk_quantum_yield",
+    "acetone_quantum_yield",
 ]
 
 # Matsumi et al. (2002) O(1D) quantum-yield parameters (JGR 107, 10.1029/2001JD000510),
@@ -224,6 +226,93 @@ def ch3cocho_quantum_yield(wl_mid, air_density_edge) -> np.ndarray:
     out = np.repeat(phi0[None, :], M.size, axis=0)
     quench = (w >= 380.0) & (w <= 440.0) & (phi0 > 0.0)
     out[:, quench] = phi0[quench] / (phi0[quench] + kq[quench] * airfac[:, None])
+    return out
+
+
+def mvk_quantum_yield(wl_mid, air_density_edge) -> np.ndarray:
+    """Φ for MVK (methyl vinyl ketone) + hv -> Products (ports ``src/quantum_yields/mvk.F90``).
+
+    TUV-x carries one total (all-channel) yield::
+
+        Φ = min(1, exp(-0.055 * (λ - 308)) / (5.5 + 9.2e-19 * M))
+
+    Returns ``(n_levels, n_wl)``.
+    """
+    w = np.asarray(wl_mid, dtype=float)
+    M = np.asarray(air_density_edge, dtype=float)
+    divisor = 5.5 + 9.2e-19 * M  # (n_levels,)
+    return np.minimum(np.exp(-0.055 * (w - 308.0))[None, :] / divisor[:, None], 1.0)
+
+
+_ACETONE_BRANCHES = ("CO", "CH3CO", "CO+CH3CO")
+
+
+def acetone_quantum_yield(
+    wl_mid, temperature_edge, air_density_edge,
+    low_wavelength_value=0.95, high_wavelength_value=0.0,
+    minimum_temperature=0.0, maximum_temperature=np.inf, branch="CH3CO",
+) -> np.ndarray:
+    """Φ for CH3COCH3 (acetone) + hv -> CH3CO + CH3, Blitz et al. (2004, GRL 31, L06111) (ports
+    ``src/quantum_yields/acetone-ch3co_ch3.F90``).
+
+    The keyword arguments are the Fortran config options and defaults (``maximum temperature``
+    defaults to ``huge``). With ``T' = clip(T, minimum_temperature, maximum_temperature) / 295``,
+    per cell midpoint λ [nm]:
+
+    * λ < 279 nm: ``low_wavelength_value``; λ > 327 nm: ``high_wavelength_value``;
+    * otherwise the CO yield ``fco = 1 / (1 + cA0)`` and the CH3CO yield ``fac`` (separate forms for
+      279 <= λ < 302 nm and 302 <= λ <= 327 nm, pressure-dependent through the air density M), and
+      Φ is ``fac`` (``branch="CH3CO"``), ``fco`` (``"CO"``) or their sum (``"CO+CH3CO"``).
+
+    ``cA0`` is set to 5e34 when its exponent exceeds 80, as in the Fortran. Returns
+    ``(n_levels, n_wl)``.
+    """
+    if branch not in _ACETONE_BRANCHES:
+        raise ValueError(f"invalid acetone quantum yield branch: {branch!r}")
+    w = np.asarray(wl_mid, dtype=float)
+    T = np.asarray(temperature_edge, dtype=float)
+    M = np.asarray(air_density_edge, dtype=float)
+    out = np.zeros((T.size, w.size))
+    out[:, w < 279.0] = low_wavelength_value
+    out[:, w > 327.0] = high_wavelength_value
+    mid = (w >= 279.0) & (w <= 327.0)
+    wm = w[mid]
+    wadj = 1.0e7 / wm
+    b1_band = wm < 302.0  # 279 <= λ < 302; the rest of `mid` is 302 <= λ <= 327
+    for i in range(T.size):
+        t = max(minimum_temperature, min(maximum_temperature, T[i])) / 295.0
+        m = M[i]
+        # CO (carbon monoxide) quantum yield
+        a0 = 0.350 * t ** (-1.28)
+        b0 = 0.068 * t ** (-2.65)
+        dumexp = b0 * (wm - 248.0)
+        cA0 = np.where(dumexp > 80.0, 5.0e34, np.exp(np.minimum(dumexp, 80.0)) * a0 / (1.0 - a0))
+        fco = 1.0 / (1.0 + cA0)
+        # CH3CO (acetyl radical) quantum yield
+        fac = np.empty_like(wm)
+        x, f = wadj[b1_band], fco[b1_band]
+        a1 = 1.600e-19 * t ** (-2.38)
+        b1 = 0.55e-3 * t ** (-3.19)
+        cA1 = a1 * np.exp(-b1 * (x - 33113.0))
+        fac[b1_band] = (1.0 - f) / (1.0 + cA1 * m)
+        x, f = wadj[~b1_band], fco[~b1_band]
+        a2 = 1.62e-17 * t ** (-10.03)
+        b2 = 1.79e-3 * t ** (-1.364)
+        cA2 = a2 * np.exp(-b2 * (x - 30488.0))
+        a3 = 26.29 * t ** (-6.59)
+        b3 = 5.72e-7 * t ** (-2.93)
+        c3 = 30006.0 * t ** (-0.064)
+        cA3 = a3 * np.exp(-b3 * (x - c3) ** 2)
+        a4 = 1.67e-15 * t ** (-7.25)
+        b4 = 2.08e-3 * t ** (-1.16)
+        cA4 = a4 * np.exp(-b4 * (x - 30488.0))
+        fac[~b1_band] = (1.0 - f) * (1.0 + cA3 + cA4 * m) / ((1.0 + cA3 + cA2 * m) * (1.0 + cA4 * m))
+        qy = np.zeros_like(wm)
+        if branch in ("CO", "CO+CH3CO"):
+            qy = qy + fco
+        if branch in ("CH3CO", "CO+CH3CO"):
+            qy = qy + fac
+        out[i, mid] = qy
     return out
 
 

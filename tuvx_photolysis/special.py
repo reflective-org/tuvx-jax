@@ -26,6 +26,8 @@ Tropospheric (MCM) recipes:
   i-C3H7ONO2) and type ``CH3ONO2+hv->CH3O+NO2`` (ch3ono2-ch3o_no2.F90; also C2H5ONO2, PAN, PPN).
 * :func:`nitroxy_acetone_cross_section` -- CH3COCH2ONO2: analytic, T-independent
   (nitroxy_acetone.F90).
+* :class:`AcetoneCrossSection` -- CH3COCH3: cubic in T clamped to [235, 298] K
+  (acetone-ch3co_ch3.F90).
 """
 
 from __future__ import annotations
@@ -47,6 +49,7 @@ __all__ = [
     "OCloCrossSection",
     "CH2OCrossSection",
     "nitroxy_acetone_cross_section",
+    "AcetoneCrossSection",
 ]
 
 # JPL94 H2O2 cross-section polynomial coefficients (h2o2-oh_oh.F90), highest power first for np.polyval.
@@ -292,6 +295,30 @@ class CH2OCrossSection:
     def evaluate(self, temperature) -> np.ndarray:
         T = np.asarray(temperature, dtype=float)
         return self.p[None, :, 0] + self.p[None, :, 1] * (T[:, None] - 298.0)
+
+
+@dataclass
+class AcetoneCrossSection:
+    """CH3COCH3 (acetone) -> CH3CO + CH3 cross section [cm^2] (ports
+    ``src/cross_sections/acetone-ch3co_ch3.F90``).
+
+    ``sigma = c1 * (1 + T * (c2 + T * (c3 + T * c4)))`` with ``T`` clamped to [235, 298] K; ``c1..c4``
+    are the four parameters of the first file (``CH3COCH3_1.nc``), each rebinned like the base cross
+    section.
+    """
+
+    c: np.ndarray  # (n_wl, 4)
+
+    @classmethod
+    def from_file(cls, td, wl_edges, lower_extrap=None, upper_extrap=None):
+        if td.n_params != 4:
+            raise ValueError("acetone cross section needs 4 parameters")  # as the Fortran asserts
+        return cls(c=_rebin_params(td, wl_edges, lower_extrap, upper_extrap))
+
+    def evaluate(self, temperature) -> np.ndarray:
+        T = np.clip(np.asarray(temperature, dtype=float), 235.0, 298.0)[:, None]
+        c1, c2, c3, c4 = (self.c[None, :, k] for k in range(4))
+        return c1 * (1.0 + T * (c2 + T * (c3 + T * c4)))
 
 
 def nitroxy_acetone_cross_section(wl_mid, n_levels) -> np.ndarray:
