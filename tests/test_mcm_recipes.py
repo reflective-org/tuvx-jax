@@ -134,6 +134,19 @@ def test_tropospheric_j_matches_fortran(calc, ref):
             )
 
 
+def test_all_supported_surface_j_matches_fortran(calc, ref):
+    # every supported reaction (incl. those sharing the new recipe types, e.g. PPN), at the surface
+    n_checked = 0
+    for ti, s in enumerate(ref["solar zenith angle"]):
+        J = calc.rate_constants_profile(float(s), float(ref["Earth-Sun distance"][ti]))
+        for name in calc.reaction_names():
+            r = ref[name][0, ti]
+            if r > 0.0:
+                assert J[name][0] == pytest.approx(r, rel=J_RTOL, abs=0.0), f"{name} SZA {s}"
+                n_checked += 1
+    assert n_checked > 4 * 70
+
+
 def test_rate_constants_surface_api(calc):
     # rate_constants(..., altitude_km=0.0) returns the surface value of the profile
     J0 = calc.rate_constants(0.0, 0.0, 2002, 3, 21, 12.0, altitude_km=0.0)

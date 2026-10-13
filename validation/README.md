@@ -17,3 +17,13 @@ Outside the deferred Lyman-α/Schumann-Runge region, the port reproduces the For
 machine precision: solar geometry, the O3 cross section, the full delta-Eddington radiation field,
 and the per-reaction photolysis rate constants. Reactions whose photolysis depends on λ < ~206 nm
 will match once the LA/SR O2 parameterization (a tracked follow-up) is added.
+
+## Tropospheric (MCM) recipes at fixed SZA
+
+The recipes ported for the MCM tropospheric mechanism (CH2O, CH3ONO2, RONO2, nitroxy-acetone, MEK,
+methylglyoxal, MVK, acetone) are validated in `tests/test_mcm_recipes.py` against a second Fortran
+reference, `tests/fixtures/tuv_5_4_no_aerosol_sza_reference.nc` (SZA 0/30/60/80 deg, with the
+Fortran's σ/φ diagnostic arrays; regenerate with `tests/fixtures/regenerate_sza_reference.py`):
+σ and φ agree to round-off (rtol 1e-12, observed ≤ 7e-15) and J at 0-15 km to rtol 1e-7 (observed
+1.75e-8, the uniform offset every reaction has against the Fortran). See the README "J coverage"
+section for the MCM J-name mapping.
