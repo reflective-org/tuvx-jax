@@ -47,6 +47,8 @@ REACTIONS = [
     "CH3CH2ONO2+hv->CH3CH2O+NO2",        # rono2 xs (B boundary-extrapolated)
     "CH3CHONO2CH3+hv->CH3CHOCH3+NO2",    #   same type (i-C3H7ONO2)
     "nitro_acetone+hv->Products",        # nitroxy_acetone analytic xs
+    "CH3COCH2CH3+hv->CH3CO+CH2CH3",      # base xs + MEK pressure-dependent QY
+    "CH3COCHO+hv->CH3CO+HCO",            # base xs + methylglyoxal quenched QY
 ]
 
 
@@ -155,3 +157,27 @@ def test_ch2o_h2_co_limits(env):
     np.testing.assert_array_equal(at_0[~band], p[~band, 1])
     phi = ch2o_h2_co_quantum_yield(p, wl, env["temperature"].edge_val, env["air"].edge_val)
     assert np.all(phi + p[None, :, 0] <= 1.0 + 1e-12)
+
+
+def test_mek_quantum_yield_regimes():
+    from tuvx_photolysis.quantum_yield import ch3coch2ch3_quantum_yield
+
+    M = np.array([0.0, 2.69e19])  # vacuum, 760 torr
+    phi = ch3coch2ch3_quantum_yield(M, 3)
+    assert phi.shape == (2, 3)
+    np.testing.assert_allclose(phi[0], 1.0)  # 1 / 0.96 capped at 1
+    np.testing.assert_allclose(phi[1], 1.0 / (0.96 + 2.22e-3 * 760.0), rtol=1e-14)
+
+
+def test_methylglyoxal_quantum_yield_regimes():
+    from tuvx_photolysis.quantum_yield import ch3cocho_quantum_yield
+
+    wl = np.array([350.0, 410.0, 450.0])  # unquenched, quenched band, beyond 440 nm
+    M = np.array([0.0, 2.456e19])  # vacuum, 760 torr
+    phi = ch3cocho_quantum_yield(wl, M)
+    np.testing.assert_array_equal(phi[:, 0], 1.0)
+    np.testing.assert_array_equal(phi[:, 2], 0.0)
+    # in the band phi0 / (phi0 + kq p) -> 1 in vacuum (as in the Fortran), with phi0(410 nm) = 0.5
+    assert phi[0, 1] == 1.0
+    kq = 1.36e8 * np.exp(-8793.0 / 410.0)
+    assert phi[1, 1] == pytest.approx(0.5 / (0.5 + kq * 760.0), rel=1e-12)

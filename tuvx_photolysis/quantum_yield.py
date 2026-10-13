@@ -34,6 +34,8 @@ __all__ = [
     "o3_o3p_quantum_yield",
     "rebin_quantum_yield_params",
     "ch2o_h2_co_quantum_yield",
+    "ch3coch2ch3_quantum_yield",
+    "ch3cocho_quantum_yield",
 ]
 
 # Matsumi et al. (2002) O(1D) quantum-yield parameters (JGR 107, 10.1029/2001JD000510),
@@ -181,6 +183,47 @@ def ch2o_h2_co_quantum_yield(params, wl_mid, temperature_edge, air_density_edge)
     t_factor = (300.0 - T) / 80.0  # (n_levels,)
     wrk = wrk[None, :] * (1.0 + 0.05 * (wl[band][None, :] - 329.0) * t_factor[:, None])
     out[:, band] = 1.0 / (1.0 / tmp[None, :] + wrk * M[:, None])
+    return out
+
+
+def ch3coch2ch3_quantum_yield(air_density_edge, n_wl) -> np.ndarray:
+    """Φ for CH3COCH2CH3 (MEK) + hv -> CH3CO + CH2CH3 (ports
+    ``src/quantum_yields/ch3coch2ch3-ch3co_ch2ch3.F90``).
+
+    Wavelength-independent Stern-Volmer form with ``p = 760 * M / 2.69e19`` [torr]::
+
+        Φ = min(1, 1 / (0.96 + 2.22e-3 * p))
+
+    Returns ``(n_levels, n_wl)``.
+    """
+    M = np.asarray(air_density_edge, dtype=float)
+    ptorr = 760.0 * M / 2.69e19
+    phi = np.minimum(1.0 / (0.96 + 2.22e-3 * ptorr), 1.0)
+    return np.repeat(phi[:, None], n_wl, axis=1)
+
+
+def ch3cocho_quantum_yield(wl_mid, air_density_edge) -> np.ndarray:
+    """Φ for CH3COCHO (methylglyoxal) + hv -> CH3CO + HCO (ports
+    ``src/quantum_yields/ch3cocho.F90``; quenching from Koch and Moortgat).
+
+    ``phi0 = clip(1 - (λ - 380) / 60, 0, 1)`` (1 below 380 nm, 0 above 440 nm). For 380 <= λ <= 440 nm
+    it is quenched by air, with ``kq = 1.36e8 * exp(-8793 / λ)`` [torr-1] and
+    ``p = M * 760 / 2.456e19`` [torr]::
+
+        Φ = phi0 / (phi0 + kq * p)
+
+    and Φ = phi0 elsewhere. Returns ``(n_levels, n_wl)``. Faithful to the Fortran: although its
+    comments call ``phi0`` the zero-pressure yield, this form tends to 1 (not ``phi0``) as p -> 0
+    inside the band.
+    """
+    w = np.asarray(wl_mid, dtype=float)
+    M = np.asarray(air_density_edge, dtype=float)
+    airfac = M * 760.0 / 2.456e19  # (n_levels,)
+    phi0 = np.clip(1.0 - (w - 380.0) / 60.0, 0.0, 1.0)
+    kq = 1.36e8 * np.exp(-8793.0 / w)
+    out = np.repeat(phi0[None, :], M.size, axis=0)
+    quench = (w >= 380.0) & (w <= 440.0) & (phi0 > 0.0)
+    out[:, quench] = phi0[quench] / (phi0[quench] + kq[quench] * airfac[:, None])
     return out
 
 

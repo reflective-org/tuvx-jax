@@ -35,6 +35,8 @@ from .quantum_yield import (
     o3_o3p_quantum_yield,
     rebin_quantum_yield_params,
     ch2o_h2_co_quantum_yield,
+    ch3coch2ch3_quantum_yield,
+    ch3cocho_quantum_yield,
 )
 
 __all__ = ["PhotolysisCalculator"]
@@ -472,6 +474,10 @@ def _eval_reaction_qy(qy_cfg, rel, wl_edges, wl_mid, temperature, air_density_ed
     if t == "CH2O":
         params = rebin_quantum_yield_params(_qy_tds(qy_cfg, rel)[0], wl_edges, **_qy_extrapolation(qy_cfg))
         return ch2o_h2_co_quantum_yield(params, wl_mid, temperature.edge_val, air_density_edge)
+    if t == "CH3COCH2CH3+hv->CH3CO+CH2CH3":
+        return ch3coch2ch3_quantum_yield(air_density_edge, n_wl)
+    if t == "CH3COCHO+hv->CH3CO+HCO":
+        return ch3cocho_quantum_yield(wl_mid, air_density_edge)
     if t == "O3+hv->O2+O(1D)":
         return o3_o1d_quantum_yield(wl_mid, temperature.edge_val)
     if t == "O3+hv->O2+O(3P)":
