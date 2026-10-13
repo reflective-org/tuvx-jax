@@ -39,6 +39,9 @@ from .quantum_yield import (
     ch3cocho_quantum_yield,
     mvk_quantum_yield,
     acetone_quantum_yield,
+    ch3cho_ch3_hco_quantum_yield,
+    c2h5cho_quantum_yield,
+    ch2chcho_quantum_yield,
 )
 
 __all__ = ["PhotolysisCalculator"]
@@ -434,6 +437,11 @@ def _qy_extrapolation(qy_cfg):
                 lower_value=lo.get("value", 0.0), upper_value=up.get("value", 0.0))
 
 
+def _qy_params(qy_cfg, rel, wl_edges):
+    """``(n_wl, n_params)`` parameters of the first quantum-yield file (as ``base_constructor``)."""
+    return rebin_quantum_yield_params(_qy_tds(qy_cfg, rel)[0], wl_edges, **_qy_extrapolation(qy_cfg))
+
+
 def _eval_reaction_xs(xs_cfg, rel, wl_edges, wl_mid, temperature, n_lev):
     t = xs_cfg.get("type")
     Te = temperature.edge_val  # photolysis cross sections are evaluated at interfaces
@@ -456,6 +464,9 @@ def _eval_reaction_xs(xs_cfg, rel, wl_edges, wl_mid, temperature, n_lev):
         return special.H2O2CrossSection.from_file(_tds(xs_cfg, rel)[0], wl_edges).evaluate(Te)
     if t == "NO2 tint":
         return special.TintCrossSection.from_files(_tds(xs_cfg, rel), wl_edges).evaluate(Te)
+    if t == "tint":
+        # tint.F90 == no2_tint.F90 except an index guard that never triggers after the T clamp
+        return special.TintCrossSection.from_files(_tds_no_options(xs_cfg, rel), wl_edges).evaluate(Te)
     if t == "OClO+hv->Products":
         return special.OCloCrossSection.from_files(_tds(xs_cfg, rel), wl_edges).evaluate(Te)
     if t == "CH2O":
@@ -482,8 +493,14 @@ def _eval_reaction_qy(qy_cfg, rel, wl_edges, wl_mid, temperature, air_density_ed
     """
     t = qy_cfg.get("type")
     if t == "CH2O":
-        params = rebin_quantum_yield_params(_qy_tds(qy_cfg, rel)[0], wl_edges, **_qy_extrapolation(qy_cfg))
+        params = _qy_params(qy_cfg, rel, wl_edges)
         return ch2o_h2_co_quantum_yield(params, wl_mid, temperature.edge_val, air_density_edge)
+    if t == "CH3CHO+hv->CH3+HCO":
+        return ch3cho_ch3_hco_quantum_yield(_qy_params(qy_cfg, rel, wl_edges), air_density_edge)
+    if t == "C2H5CHO":
+        return c2h5cho_quantum_yield(_qy_params(qy_cfg, rel, wl_edges), air_density_edge)
+    if t == "CH2CHCHO+hv->Products":
+        return ch2chcho_quantum_yield(air_density_edge, n_wl)
     if t == "CH3COCH2CH3+hv->CH3CO+CH2CH3":
         return ch3coch2ch3_quantum_yield(air_density_edge, n_wl)
     if t == "CH3COCHO+hv->CH3CO+HCO":

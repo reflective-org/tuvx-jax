@@ -101,8 +101,10 @@ The recipes ported for this mechanism are CH2O (`ch2o.F90` cross section and H2+
 yield; the H+HCO channel is the base quantum yield on parameter 1 of `CH2O_1.nc`), CH3ONO2
 (`ch3ono2-ch3o_no2.F90`), RONO2 (`rono2.F90`, e.g. i-C3H7ONO2), nitroxy-acetone
 (`nitroxy_acetone.F90`), MEK (`ch3coch2ch3-ch3co_ch2ch3.F90`), methylglyoxal (`ch3cocho.F90`), MVK
-(`mvk.F90`) and acetone (`acetone-ch3co_ch3.F90` cross section and quantum yield). They are
-checked against Fortran TUV-x 0.15.0 output for `tests/fixtures/tuv_5_4_no_aerosol_sza.json`
+(`mvk.F90`) and acetone (`acetone-ch3co_ch3.F90` cross section and quantum yield); also
+acetaldehyde (`ch3cho-ch3_hco.F90`), propanal (`c2h5cho.F90`) and acrolein (`ch2chcho.F90`)
+quantum yields and the generic `tint` cross section (`tint.F90`), which the mechanism does not use
+directly. They are checked against Fortran TUV-x 0.15.0 output for `tests/fixtures/tuv_5_4_no_aerosol_sza.json`
 (the validated config at fixed SZA 0/30/60/80 deg, 1 AU, with σ/φ diagnostics; regenerate with
 `python tests/fixtures/regenerate_sza_reference.py /path/to/tuv-x/build`):
 
@@ -112,8 +114,10 @@ checked against Fortran TUV-x 0.15.0 output for `tests/fixtures/tuv_5_4_no_aeros
   reaction, the same SZA-independent offset every long-validated reaction shows against the
   Fortran (a common scalar, not a recipe error).
 
-Reactions sharing these recipe types (C2H5ONO2, PAN, PPN, CH3CH2ONO2) are enabled too and
-checked the same way, or against the original two-time reference in `test_photolysis.py`.
+Reactions sharing these recipe types (C2H5ONO2, PAN, PPN, CH3CH2ONO2; the `tint` halocarbons)
+are enabled too and checked the same way, or by surface J at every SZA and against the original
+two-time reference in `test_photolysis.py`. `examples/tuv_5_4_no_aerosol.json` now yields 94
+reactions (was 70); the 15 still in `skipped_reactions` use recipes not needed here.
 
 ## Provenance
 

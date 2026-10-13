@@ -16,7 +16,7 @@ per-level temperature [K]:
 * :class:`H2O2CrossSection` -- H2O2: JPL94 temperature-dependent form over [260, 350) nm, base
   tabulated data elsewhere (h2o2-oh_oh.F90).
 * :class:`TintCrossSection`  -- generic temperature interpolation, one or more files each with a
-  temperature axis (no2_tint.F90); linear-in-T == ``numpy.interp``.
+  temperature axis (no2_tint.F90, and type ``tint``: tint.F90); linear-in-T == ``numpy.interp``.
 * :class:`OCloCrossSection`  -- OClO: each file is one temperature node, interpolated across files.
 
 Tropospheric (MCM) recipes:
@@ -209,7 +209,9 @@ class TintCrossSection:
 
     Each file carries a temperature axis; the cross section is linearly interpolated in temperature
     (== ``numpy.interp``: clamp to the tabulated range, then linear) and summed across files (files
-    cover disjoint wavelength bands, zero elsewhere).
+    cover disjoint wavelength bands, zero elsewhere). Also serves type ``tint`` (tint.F90), which
+    differs from no2_tint.F90 only by a ``min(nTemp, tNdx)`` index guard that cannot trigger once
+    the temperature is clamped to the table.
     """
 
     files: list  # list[_TintFile]

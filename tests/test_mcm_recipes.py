@@ -51,6 +51,11 @@ REACTIONS = [
     "CH3COCHO+hv->CH3CO+HCO",            # base xs + methylglyoxal quenched QY
     "MVK+hv->Products",                  # base xs + MVK total QY
     "CH3COCH3+hv->CH3CO+CH3",            # acetone T-cubic xs + Blitz et al. (2004) QY
+    "CH3CHO+hv->CH3+HCO",                # base xs + acetaldehyde pressure-dependent QY
+    "C2H5CHO+hv->C2H5+HCO",              # base xs + propanal Stern-Volmer QY
+    "CH2CHCHO+hv->Products",             # base xs + acrolein QY
+    "NOCl+hv->NO+Cl",                    # tint xs
+    "CFC-113+hv->Products",              # tint xs (descending temperature table)
 ]
 
 
@@ -205,6 +210,17 @@ def test_mvk_quantum_yield_regimes():
     np.testing.assert_array_equal(phi[:, 0], 1.0)  # capped at 1
     np.testing.assert_allclose(phi[:, 1], [1.0 / 5.5, 1.0 / (5.5 + 9.2e-19 * 2.5e19)], rtol=1e-14)
     assert np.all(phi[:, 2] < phi[:, 1])  # decays with wavelength
+
+
+def test_acrolein_quantum_yield_regimes():
+    from tuvx_photolysis.quantum_yield import ch2chcho_quantum_yield
+
+    phi = ch2chcho_quantum_yield(np.array([1.0e17, 8.0e17, 1.0e19, 2.7e19]), 2)
+    expect_low = 0.004 + 1.0 / (0.086 + 1.613e-17 * 8.0e17)  # density floored at 8e17
+    np.testing.assert_allclose(phi[:2, 0], expect_low, rtol=1e-14)
+    assert phi[2, 0] == pytest.approx(0.004 + 1.0 / (0.086 + 1.613e-17 * 1.0e19), rel=1e-14)
+    assert phi[3, 0] == 0.004  # above 2.6e19 molecule cm-3
+    np.testing.assert_array_equal(phi[:, 0], phi[:, 1])  # wavelength-independent
 
 
 def test_acetone_quantum_yield_branches():

@@ -38,6 +38,9 @@ __all__ = [
     "ch3cocho_quantum_yield",
     "mvk_quantum_yield",
     "acetone_quantum_yield",
+    "ch3cho_ch3_hco_quantum_yield",
+    "c2h5cho_quantum_yield",
+    "ch2chcho_quantum_yield",
 ]
 
 # Matsumi et al. (2002) O(1D) quantum-yield parameters (JGR 107, 10.1029/2001JD000510),
@@ -227,6 +230,61 @@ def ch3cocho_quantum_yield(wl_mid, air_density_edge) -> np.ndarray:
     quench = (w >= 380.0) & (w <= 440.0) & (phi0 > 0.0)
     out[:, quench] = phi0[quench] / (phi0[quench] + kq[quench] * airfac[:, None])
     return out
+
+
+def ch3cho_ch3_hco_quantum_yield(params, air_density_edge) -> np.ndarray:
+    """Φ for CH3CHO (acetaldehyde) + hv -> CH3 + HCO (ports
+    ``src/quantum_yields/ch3cho-ch3_hco.F90``).
+
+    ``params`` is ``(n_wl, 2)`` from :func:`rebin_quantum_yield_params` on ``CH3CHO_1.nc``. With
+    ``q1 = params[:, 1]``, ``q2 = 1 - params[:, 0]``, ``w = q2 / q1 - 1`` (0 where ``q1 <= 0``) and
+    ``f = M / 2.465e19``::
+
+        Φ = clip(q1 * (1 + w) / (1 + w * f), 0, 1)
+
+    Returns ``(n_levels, n_wl)``.
+    """
+    M = np.asarray(air_density_edge, dtype=float)
+    q1 = params[:, 1]
+    q2 = 1.0 - params[:, 0]
+    pos = q1 > 0.0
+    w = np.zeros_like(q1)
+    w[pos] = q2[pos] / q1[pos] - 1.0
+    f = (M / 2.465e19)[:, None]
+    return np.minimum(1.0, np.maximum(0.0, q1 * (1.0 + w) / (1.0 + w * f)))
+
+
+def c2h5cho_quantum_yield(params, air_density_edge) -> np.ndarray:
+    """Φ for C2H5CHO (propanal) + hv -> C2H5 + HCO, Stern-Volmer (ports
+    ``src/quantum_yields/c2h5cho.F90``).
+
+    With ``q = params[:, 0]`` (``C2H5CHO_1.nc`` rebinned) and ``f = M / 2.45e19``::
+
+        Φ = min(1, 1 / (1 + (1 / q - 1) * f))     (0 where q < 1e-35)
+
+    Returns ``(n_levels, n_wl)``.
+    """
+    M = np.asarray(air_density_edge, dtype=float)
+    q = params[:, 0]
+    pzero = 10.0 / 1.0e36  # Fortran: 10 / largest
+    ok = q >= pzero
+    out = np.zeros((M.size, q.size))
+    f = (M / 2.45e19)[:, None]
+    out[:, ok] = np.minimum(1.0, 1.0 / (1.0 + (1.0 / q[ok] - 1.0) * f))
+    return out
+
+
+def ch2chcho_quantum_yield(air_density_edge, n_wl) -> np.ndarray:
+    """Φ for CH2CHCHO (acrolein) + hv -> Products, wavelength-independent (ports
+    ``src/quantum_yields/ch2chcho.F90``).
+
+    Φ = 0.004 for M > 2.6e19 molecule cm-3; otherwise ``Φ = 0.004 + 1 / (0.086 + 1.613e-17 * M')``
+    with ``M' = max(M, 8e17)``. Returns ``(n_levels, n_wl)``.
+    """
+    M = np.asarray(air_density_edge, dtype=float)
+    phi_l, phi_u = 0.004, 0.086
+    phi = np.where(M > 2.6e19, phi_l, phi_l + 1.0 / (phi_u + 1.613e-17 * np.maximum(M, 8.0e17)))
+    return np.repeat(phi[:, None], n_wl, axis=1)
 
 
 def mvk_quantum_yield(wl_mid, air_density_edge) -> np.ndarray:
