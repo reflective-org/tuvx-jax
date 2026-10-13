@@ -4,8 +4,14 @@
 
 Reference: ``src/quantum_yield.F90``. The ``base`` quantum yield is either a constant value held
 across wavelength, or a tabulated spectrum read from NetCDF and area-conservingly rebinned onto the
-model wavelength grid (then replicated across altitude). Reaction-specific quantum-yield recipes
-(e.g. the O3 photolysis branching) are separate evaluators to be added as needed.
+model wavelength grid (then replicated across altitude). As in the Fortran ``run``, only the first
+parameter of the first file is used (e.g. ``CH2O_1.nc`` carries two channels; the base type takes
+the H + HCO one). Reaction-specific quantum-yield recipes (e.g. the O3 photolysis branching) are
+separate evaluators, each citing the ``src/quantum_yields`` module it ports.
+
+The pressure-dependent recipes take the air number density at the height-grid interfaces
+(``air_density_edge`` [molecule cm-3], the Fortran ``air`` profile ``edge_val_``) and evaluate
+wavelength-dependent terms at the wavelength-cell midpoints (``wl_mid``), as the Fortran does.
 """
 
 from __future__ import annotations
@@ -26,6 +32,8 @@ __all__ = [
     "clooocl_branching_quantum_yield",
     "o3_o1d_quantum_yield",
     "o3_o3p_quantum_yield",
+    "rebin_quantum_yield_params",
+    "ch2o_h2_co_quantum_yield",
 ]
 
 # Matsumi et al. (2002) O(1D) quantum-yield parameters (JGR 107, 10.1029/2001JD000510),
@@ -125,6 +133,55 @@ def clono2_quantum_yield(wl_mid, n_levels, branch) -> np.ndarray:
     elif branch != "Cl+NO3":
         raise ValueError(f"unknown ClONO2 branch: {branch}")
     return np.repeat(phi[None, :], n_levels, axis=0)
+
+
+def rebin_quantum_yield_params(
+    td: TabulatedData, wl_edges, lower_extrapolation=None, upper_extrapolation=None,
+    lower_value=0.0, upper_value=0.0,
+) -> np.ndarray:
+    """Every parameter column of a quantum-yield file rebinned onto the grid, ``(n_wl, n_params)``.
+
+    Ports the file loop of ``base_constructor`` in ``src/quantum_yield.F90``: each column is padded
+    with the quantum yield's ``lower``/``upper extrapolation`` (:func:`add_points`; ``boundary`` holds
+    that column's own edge value) and conservingly rebinned.
+    """
+    from .cross_section import add_points
+
+    cols = []
+    for p in range(td.n_params):
+        x, y = add_points(
+            td.wavelength, td.parameters[:, p],
+            lower_extrapolation, upper_extrapolation, lower_value, upper_value,
+        )
+        cols.append(interp_conserving(np.asarray(wl_edges, dtype=float), x, y))
+    return np.stack(cols, axis=1)
+
+
+def ch2o_h2_co_quantum_yield(params, wl_mid, temperature_edge, air_density_edge) -> np.ndarray:
+    """Φ for CH2O + hv -> H2 + CO, pressure- and temperature-dependent (ports
+    ``src/quantum_yields/ch2o.F90``, ``quantum_yield_ch2o_h2_co_t``).
+
+    ``params`` is ``(n_wl, 2)`` from :func:`rebin_quantum_yield_params` on ``CH2O_1.nc``: column 0 is
+    Φ1 (H + HCO), column 1 is Φ2 (H2 + CO, zero-pressure). With ``M`` the air density and
+    ``Tf = (300 - T) / 80``, for cells whose midpoint is in [330, 360) nm and where Φ2 > 0::
+
+        k   = (1 - (Φ1 + Φ2)) / (2.45e19 * Φ2 * (1 - Φ1)) * (1 + 0.05 * (λ - 329) * Tf)
+        Φ   = 1 / (1 / (1 - Φ1) + k * M)
+
+    and Φ = Φ2 elsewhere. Returns ``(n_levels, n_wl)``.
+    """
+    wl = np.asarray(wl_mid, dtype=float)
+    T = np.asarray(temperature_edge, dtype=float)
+    M = np.asarray(air_density_edge, dtype=float)
+    q1, q2 = params[:, 0], params[:, 1]
+    out = np.repeat(q2[None, :], T.size, axis=0)
+    band = (wl >= 330.0) & (wl < 360.0) & (q2 > 0.0)
+    tmp = 1.0 - q1[band]
+    wrk = (1.0 - (q1[band] + q2[band])) / (2.45e19 * q2[band] * tmp)  # (n_band,)
+    t_factor = (300.0 - T) / 80.0  # (n_levels,)
+    wrk = wrk[None, :] * (1.0 + 0.05 * (wl[band][None, :] - 329.0) * t_factor[:, None])
+    out[:, band] = 1.0 / (1.0 / tmp[None, :] + wrk * M[:, None])
+    return out
 
 
 @dataclass

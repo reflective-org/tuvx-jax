@@ -18,6 +18,10 @@ per-level temperature [K]:
 * :class:`TintCrossSection`  -- generic temperature interpolation, one or more files each with a
   temperature axis (no2_tint.F90); linear-in-T == ``numpy.interp``.
 * :class:`OCloCrossSection`  -- OClO: each file is one temperature node, interpolated across files.
+
+Tropospheric (MCM) recipes:
+
+* :class:`CH2OCrossSection` -- CH2O: ``p1 + p2 * (T - 298)``, no temperature clamp (ch2o.F90).
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ __all__ = [
     "H2O2CrossSection",
     "TintCrossSection",
     "OCloCrossSection",
+    "CH2OCrossSection",
 ]
 
 # JPL94 H2O2 cross-section polynomial coefficients (h2o2-oh_oh.F90), highest power first for np.polyval.
@@ -241,3 +246,36 @@ class OCloCrossSection:
         for w in range(n_wl):
             out[:, w] = np.interp(T, self.temps, self.arrays[:, w])
         return out
+
+
+def _rebin_params(td, wl_edges, lower_extrap=None, upper_extrap=None) -> np.ndarray:
+    """Every parameter column of ``td`` padded and rebinned, shape ``(n_wl, n_params)``.
+
+    Matches the base ``process_file`` in ``src/cross_section.F90``: the same extrapolation is
+    applied to each parameter.
+    """
+    return np.stack(
+        [_rebin_param(td.wavelength, td.parameters[:, p], wl_edges, lower_extrap, upper_extrap)
+         for p in range(td.n_params)],
+        axis=1,
+    )
+
+
+@dataclass
+class CH2OCrossSection:
+    """CH2O (formaldehyde) cross section [cm^2] (ports ``src/cross_sections/ch2o.F90``).
+
+    ``sigma(T) = p1(lambda) + p2(lambda) * (T - 298 K)`` per level, with no temperature clamp. ``p1``
+    and ``p2`` are the two parameters of the first file (``CH2O_1.nc``), each rebinned like the base
+    cross section.
+    """
+
+    p: np.ndarray  # (n_wl, 2)
+
+    @classmethod
+    def from_file(cls, td, wl_edges, lower_extrap=None, upper_extrap=None):
+        return cls(p=_rebin_params(td, wl_edges, lower_extrap, upper_extrap))
+
+    def evaluate(self, temperature) -> np.ndarray:
+        T = np.asarray(temperature, dtype=float)
+        return self.p[None, :, 0] + self.p[None, :, 1] * (T[:, None] - 298.0)
