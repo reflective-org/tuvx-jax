@@ -41,6 +41,12 @@ TROPOSPHERE = slice(0, 16)  # 0..15 km on the 1 km height grid
 REACTIONS = [
     "CH2O+hv->H+HCO",                    # ch2o xs + base QY (parameter 1 of CH2O_1.nc)
     "CH2O+hv->H2+CO",                    # ch2o xs + ch2o (H2+CO) QY
+    "CH3ONO2+hv->CH3O+NO2",              # ch3ono2 xs (B zero-padded)
+    "C2H5ONO2+hv->C2H5O+NO2",            #   same type
+    "PAN+hv->CH3CO(OO)+NO2",             #   same type
+    "CH3CH2ONO2+hv->CH3CH2O+NO2",        # rono2 xs (B boundary-extrapolated)
+    "CH3CHONO2CH3+hv->CH3CHOCH3+NO2",    #   same type (i-C3H7ONO2)
+    "nitro_acetone+hv->Products",        # nitroxy_acetone analytic xs
 ]
 
 

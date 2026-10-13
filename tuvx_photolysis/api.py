@@ -450,6 +450,15 @@ def _eval_reaction_xs(xs_cfg, rel, wl_edges, wl_mid, temperature, n_lev):
         return special.OCloCrossSection.from_files(_tds(xs_cfg, rel), wl_edges).evaluate(Te)
     if t == "CH2O":
         return special.CH2OCrossSection.from_file(_tds_no_options(xs_cfg, rel)[0], wl_edges).evaluate(Te)
+    if t == "RONO2":
+        # rono2.F90 is the hno3-oh_no2.F90 recipe (B boundary-extrapolated)
+        return special.HNO3CrossSection.from_file(_tds_no_options(xs_cfg, rel)[0], wl_edges).evaluate(Te)
+    if t == "CH3ONO2+hv->CH3O+NO2":
+        # same form, but B is padded like the base cross section (zero outside the data)
+        td = _tds_no_options(xs_cfg, rel)[0]
+        return special.HNO3CrossSection.from_file(td, wl_edges, b_extrap=None).evaluate(Te)
+    if t == "CH3COCH2(ONO2)+hv->CH3COCH2(O.)+NO2":
+        return special.nitroxy_acetone_cross_section(wl_mid, n_lev)
     raise _Unsupported(f"cross section type '{t}' not ported")
 
 

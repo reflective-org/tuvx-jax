@@ -22,6 +22,10 @@ per-level temperature [K]:
 Tropospheric (MCM) recipes:
 
 * :class:`CH2OCrossSection` -- CH2O: ``p1 + p2 * (T - 298)``, no temperature clamp (ch2o.F90).
+* :class:`HNO3CrossSection` also serves the alkyl nitrates: type ``RONO2`` (rono2.F90, e.g.
+  i-C3H7ONO2) and type ``CH3ONO2+hv->CH3O+NO2`` (ch3ono2-ch3o_no2.F90; also C2H5ONO2, PAN, PPN).
+* :func:`nitroxy_acetone_cross_section` -- CH3COCH2ONO2: analytic, T-independent
+  (nitroxy_acetone.F90).
 """
 
 from __future__ import annotations
@@ -42,6 +46,7 @@ __all__ = [
     "TintCrossSection",
     "OCloCrossSection",
     "CH2OCrossSection",
+    "nitroxy_acetone_cross_section",
 ]
 
 # JPL94 H2O2 cross-section polynomial coefficients (h2o2-oh_oh.F90), highest power first for np.polyval.
@@ -78,17 +83,25 @@ def hobr_cross_section(wl_mid, n_levels) -> np.ndarray:
 
 @dataclass
 class HNO3CrossSection:
-    """HNO3 -> OH + NO2: ``sigma0(lambda) * exp(B(lambda) * (T - 298 K))`` (hno3-oh_no2.F90)."""
+    """``sigma0(lambda) * exp(B(lambda) * (T - 298 K))``, no temperature clamp.
+
+    Three Fortran modules share this form and differ only in how B is padded before rebinning:
+
+    * HNO3 -> OH + NO2 (``hno3-oh_no2.F90``) and alkyl nitrates, type ``RONO2`` (``rono2.F90``):
+      B is boundary-extrapolated at both ends (``b_extrap="boundary"``, the default);
+    * CH3ONO2 -> CH3O + NO2 and the other users of that type (``ch3ono2-ch3o_no2.F90``): B is
+      padded like sigma0 by the base ``process_file`` (``b_extrap=None`` -> zero outside the data).
+    """
 
     sigma0: np.ndarray  # (n_wl,)
     b: np.ndarray  # (n_wl,)
 
     @classmethod
-    def from_file(cls, td, wl_edges, lower_extrap=None, upper_extrap=None):
+    def from_file(cls, td, wl_edges, lower_extrap=None, upper_extrap=None, b_extrap="boundary"):
         s0 = _rebin_param(td.wavelength, td.parameters[:, 0], wl_edges, lower_extrap, upper_extrap)
-        # the temperature coefficient B is boundary-extrapolated at both ends (hno3-oh_no2.F90
-        # forces this), which affects its conserving rebin in the edge wavelength cells
-        b = _rebin_param(td.wavelength, td.parameters[:, 1], wl_edges, "boundary", "boundary")
+        # the padding of the temperature coefficient B affects its conserving rebin in the edge
+        # wavelength cells (hno3-oh_no2.F90 / rono2.F90 force "boundary" at both ends)
+        b = _rebin_param(td.wavelength, td.parameters[:, 1], wl_edges, b_extrap, b_extrap)
         return cls(sigma0=s0, b=b)
 
     def evaluate(self, temperature) -> np.ndarray:
@@ -279,3 +292,19 @@ class CH2OCrossSection:
     def evaluate(self, temperature) -> np.ndarray:
         T = np.asarray(temperature, dtype=float)
         return self.p[None, :, 0] + self.p[None, :, 1] * (T[:, None] - 298.0)
+
+
+def nitroxy_acetone_cross_section(wl_mid, n_levels) -> np.ndarray:
+    """CH3COCH2(ONO2) (nitroxy-acetone) -> CH3COCH2(O.) + NO2 cross section [cm^2] (ports
+    ``src/cross_sections/nitroxy_acetone.F90``).
+
+    ``exp(c + lambda * (b + a * lambda))`` with ``a = -1.365e-3``, ``b = 0.7834``, ``c = -156.8`` at
+    the cell midpoint for 284 <= lambda <= 335 nm, zero elsewhere; temperature-independent (no data
+    files). Shape ``(n_levels, n_wl)``.
+    """
+    wc = np.asarray(wl_mid, dtype=float)
+    a, b, c = -1.365e-3, 0.7834, -156.8
+    band = (wc >= 284.0) & (wc <= 335.0)
+    xs = np.zeros_like(wc)
+    xs[band] = np.exp(c + wc[band] * (b + a * wc[band]))
+    return np.repeat(xs[None, :], n_levels, axis=0)
