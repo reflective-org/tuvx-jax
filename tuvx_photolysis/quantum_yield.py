@@ -4,8 +4,14 @@
 
 Reference: ``src/quantum_yield.F90``. The ``base`` quantum yield is either a constant value held
 across wavelength, or a tabulated spectrum read from NetCDF and area-conservingly rebinned onto the
-model wavelength grid (then replicated across altitude). Reaction-specific quantum-yield recipes
-(e.g. the O3 photolysis branching) are separate evaluators to be added as needed.
+model wavelength grid (then replicated across altitude). As in the Fortran ``run``, only the first
+parameter of the first file is used (e.g. ``CH2O_1.nc`` carries two channels; the base type takes
+the H + HCO one). Reaction-specific quantum-yield recipes (e.g. the O3 photolysis branching) are
+separate evaluators, each citing the ``src/quantum_yields`` module it ports.
+
+The pressure-dependent recipes take the air number density at the height-grid interfaces
+(``air_density_edge`` [molecule cm-3], the Fortran ``air`` profile ``edge_val_``) and evaluate
+wavelength-dependent terms at the wavelength-cell midpoints (``wl_mid``), as the Fortran does.
 """
 
 from __future__ import annotations
@@ -26,6 +32,15 @@ __all__ = [
     "clooocl_branching_quantum_yield",
     "o3_o1d_quantum_yield",
     "o3_o3p_quantum_yield",
+    "rebin_quantum_yield_params",
+    "ch2o_h2_co_quantum_yield",
+    "ch3coch2ch3_quantum_yield",
+    "ch3cocho_quantum_yield",
+    "mvk_quantum_yield",
+    "acetone_quantum_yield",
+    "ch3cho_ch3_hco_quantum_yield",
+    "c2h5cho_quantum_yield",
+    "ch2chcho_quantum_yield",
 ]
 
 # Matsumi et al. (2002) O(1D) quantum-yield parameters (JGR 107, 10.1029/2001JD000510),
@@ -125,6 +140,238 @@ def clono2_quantum_yield(wl_mid, n_levels, branch) -> np.ndarray:
     elif branch != "Cl+NO3":
         raise ValueError(f"unknown ClONO2 branch: {branch}")
     return np.repeat(phi[None, :], n_levels, axis=0)
+
+
+def rebin_quantum_yield_params(
+    td: TabulatedData, wl_edges, lower_extrapolation=None, upper_extrapolation=None,
+    lower_value=0.0, upper_value=0.0,
+) -> np.ndarray:
+    """Every parameter column of a quantum-yield file rebinned onto the grid, ``(n_wl, n_params)``.
+
+    Ports the file loop of ``base_constructor`` in ``src/quantum_yield.F90``: each column is padded
+    with the quantum yield's ``lower``/``upper extrapolation`` (:func:`add_points`; ``boundary`` holds
+    that column's own edge value) and conservingly rebinned.
+    """
+    from .cross_section import add_points
+
+    cols = []
+    for p in range(td.n_params):
+        x, y = add_points(
+            td.wavelength, td.parameters[:, p],
+            lower_extrapolation, upper_extrapolation, lower_value, upper_value,
+        )
+        cols.append(interp_conserving(np.asarray(wl_edges, dtype=float), x, y))
+    return np.stack(cols, axis=1)
+
+
+def ch2o_h2_co_quantum_yield(params, wl_mid, temperature_edge, air_density_edge) -> np.ndarray:
+    """Φ for CH2O + hv -> H2 + CO, pressure- and temperature-dependent (ports
+    ``src/quantum_yields/ch2o.F90``, ``quantum_yield_ch2o_h2_co_t``).
+
+    ``params`` is ``(n_wl, 2)`` from :func:`rebin_quantum_yield_params` on ``CH2O_1.nc``: column 0 is
+    Φ1 (H + HCO), column 1 is Φ2 (H2 + CO, zero-pressure). With ``M`` the air density and
+    ``Tf = (300 - T) / 80``, for cells whose midpoint is in [330, 360) nm and where Φ2 > 0::
+
+        k   = (1 - (Φ1 + Φ2)) / (2.45e19 * Φ2 * (1 - Φ1)) * (1 + 0.05 * (λ - 329) * Tf)
+        Φ   = 1 / (1 / (1 - Φ1) + k * M)
+
+    and Φ = Φ2 elsewhere. Returns ``(n_levels, n_wl)``.
+    """
+    wl = np.asarray(wl_mid, dtype=float)
+    T = np.asarray(temperature_edge, dtype=float)
+    M = np.asarray(air_density_edge, dtype=float)
+    q1, q2 = params[:, 0], params[:, 1]
+    out = np.repeat(q2[None, :], T.size, axis=0)
+    band = (wl >= 330.0) & (wl < 360.0) & (q2 > 0.0)
+    tmp = 1.0 - q1[band]
+    wrk = (1.0 - (q1[band] + q2[band])) / (2.45e19 * q2[band] * tmp)  # (n_band,)
+    t_factor = (300.0 - T) / 80.0  # (n_levels,)
+    wrk = wrk[None, :] * (1.0 + 0.05 * (wl[band][None, :] - 329.0) * t_factor[:, None])
+    out[:, band] = 1.0 / (1.0 / tmp[None, :] + wrk * M[:, None])
+    return out
+
+
+def ch3coch2ch3_quantum_yield(air_density_edge, n_wl) -> np.ndarray:
+    """Φ for CH3COCH2CH3 (MEK) + hv -> CH3CO + CH2CH3 (ports
+    ``src/quantum_yields/ch3coch2ch3-ch3co_ch2ch3.F90``).
+
+    Wavelength-independent Stern-Volmer form with ``p = 760 * M / 2.69e19`` [torr]::
+
+        Φ = min(1, 1 / (0.96 + 2.22e-3 * p))
+
+    Returns ``(n_levels, n_wl)``.
+    """
+    M = np.asarray(air_density_edge, dtype=float)
+    ptorr = 760.0 * M / 2.69e19
+    phi = np.minimum(1.0 / (0.96 + 2.22e-3 * ptorr), 1.0)
+    return np.repeat(phi[:, None], n_wl, axis=1)
+
+
+def ch3cocho_quantum_yield(wl_mid, air_density_edge) -> np.ndarray:
+    """Φ for CH3COCHO (methylglyoxal) + hv -> CH3CO + HCO (ports
+    ``src/quantum_yields/ch3cocho.F90``; quenching from Koch and Moortgat).
+
+    ``phi0 = clip(1 - (λ - 380) / 60, 0, 1)`` (1 below 380 nm, 0 above 440 nm). For 380 <= λ <= 440 nm
+    it is quenched by air, with ``kq = 1.36e8 * exp(-8793 / λ)`` [torr-1] and
+    ``p = M * 760 / 2.456e19`` [torr]::
+
+        Φ = phi0 / (phi0 + kq * p)
+
+    and Φ = phi0 elsewhere. Returns ``(n_levels, n_wl)``. Faithful to the Fortran: although its
+    comments call ``phi0`` the zero-pressure yield, this form tends to 1 (not ``phi0``) as p -> 0
+    inside the band.
+    """
+    w = np.asarray(wl_mid, dtype=float)
+    M = np.asarray(air_density_edge, dtype=float)
+    airfac = M * 760.0 / 2.456e19  # (n_levels,)
+    phi0 = np.clip(1.0 - (w - 380.0) / 60.0, 0.0, 1.0)
+    kq = 1.36e8 * np.exp(-8793.0 / w)
+    out = np.repeat(phi0[None, :], M.size, axis=0)
+    quench = (w >= 380.0) & (w <= 440.0) & (phi0 > 0.0)
+    out[:, quench] = phi0[quench] / (phi0[quench] + kq[quench] * airfac[:, None])
+    return out
+
+
+def ch3cho_ch3_hco_quantum_yield(params, air_density_edge) -> np.ndarray:
+    """Φ for CH3CHO (acetaldehyde) + hv -> CH3 + HCO (ports
+    ``src/quantum_yields/ch3cho-ch3_hco.F90``).
+
+    ``params`` is ``(n_wl, 2)`` from :func:`rebin_quantum_yield_params` on ``CH3CHO_1.nc``. With
+    ``q1 = params[:, 1]``, ``q2 = 1 - params[:, 0]``, ``w = q2 / q1 - 1`` (0 where ``q1 <= 0``) and
+    ``f = M / 2.465e19``::
+
+        Φ = clip(q1 * (1 + w) / (1 + w * f), 0, 1)
+
+    Returns ``(n_levels, n_wl)``.
+    """
+    M = np.asarray(air_density_edge, dtype=float)
+    q1 = params[:, 1]
+    q2 = 1.0 - params[:, 0]
+    pos = q1 > 0.0
+    w = np.zeros_like(q1)
+    w[pos] = q2[pos] / q1[pos] - 1.0
+    f = (M / 2.465e19)[:, None]
+    return np.minimum(1.0, np.maximum(0.0, q1 * (1.0 + w) / (1.0 + w * f)))
+
+
+def c2h5cho_quantum_yield(params, air_density_edge) -> np.ndarray:
+    """Φ for C2H5CHO (propanal) + hv -> C2H5 + HCO, Stern-Volmer (ports
+    ``src/quantum_yields/c2h5cho.F90``).
+
+    With ``q = params[:, 0]`` (``C2H5CHO_1.nc`` rebinned) and ``f = M / 2.45e19``::
+
+        Φ = min(1, 1 / (1 + (1 / q - 1) * f))     (0 where q < 1e-35)
+
+    Returns ``(n_levels, n_wl)``.
+    """
+    M = np.asarray(air_density_edge, dtype=float)
+    q = params[:, 0]
+    pzero = 10.0 / 1.0e36  # Fortran: 10 / largest
+    ok = q >= pzero
+    out = np.zeros((M.size, q.size))
+    f = (M / 2.45e19)[:, None]
+    out[:, ok] = np.minimum(1.0, 1.0 / (1.0 + (1.0 / q[ok] - 1.0) * f))
+    return out
+
+
+def ch2chcho_quantum_yield(air_density_edge, n_wl) -> np.ndarray:
+    """Φ for CH2CHCHO (acrolein) + hv -> Products, wavelength-independent (ports
+    ``src/quantum_yields/ch2chcho.F90``).
+
+    Φ = 0.004 for M > 2.6e19 molecule cm-3; otherwise ``Φ = 0.004 + 1 / (0.086 + 1.613e-17 * M')``
+    with ``M' = max(M, 8e17)``. Returns ``(n_levels, n_wl)``.
+    """
+    M = np.asarray(air_density_edge, dtype=float)
+    phi_l, phi_u = 0.004, 0.086
+    phi = np.where(M > 2.6e19, phi_l, phi_l + 1.0 / (phi_u + 1.613e-17 * np.maximum(M, 8.0e17)))
+    return np.repeat(phi[:, None], n_wl, axis=1)
+
+
+def mvk_quantum_yield(wl_mid, air_density_edge) -> np.ndarray:
+    """Φ for MVK (methyl vinyl ketone) + hv -> Products (ports ``src/quantum_yields/mvk.F90``).
+
+    TUV-x carries one total (all-channel) yield::
+
+        Φ = min(1, exp(-0.055 * (λ - 308)) / (5.5 + 9.2e-19 * M))
+
+    Returns ``(n_levels, n_wl)``.
+    """
+    w = np.asarray(wl_mid, dtype=float)
+    M = np.asarray(air_density_edge, dtype=float)
+    divisor = 5.5 + 9.2e-19 * M  # (n_levels,)
+    return np.minimum(np.exp(-0.055 * (w - 308.0))[None, :] / divisor[:, None], 1.0)
+
+
+_ACETONE_BRANCHES = ("CO", "CH3CO", "CO+CH3CO")
+
+
+def acetone_quantum_yield(
+    wl_mid, temperature_edge, air_density_edge,
+    low_wavelength_value=0.95, high_wavelength_value=0.0,
+    minimum_temperature=0.0, maximum_temperature=np.inf, branch="CH3CO",
+) -> np.ndarray:
+    """Φ for CH3COCH3 (acetone) + hv -> CH3CO + CH3, Blitz et al. (2004, GRL 31, L06111) (ports
+    ``src/quantum_yields/acetone-ch3co_ch3.F90``).
+
+    The keyword arguments are the Fortran config options and defaults (``maximum temperature``
+    defaults to ``huge``). With ``T' = clip(T, minimum_temperature, maximum_temperature) / 295``,
+    per cell midpoint λ [nm]:
+
+    * λ < 279 nm: ``low_wavelength_value``; λ > 327 nm: ``high_wavelength_value``;
+    * otherwise the CO yield ``fco = 1 / (1 + cA0)`` and the CH3CO yield ``fac`` (separate forms for
+      279 <= λ < 302 nm and 302 <= λ <= 327 nm, pressure-dependent through the air density M), and
+      Φ is ``fac`` (``branch="CH3CO"``), ``fco`` (``"CO"``) or their sum (``"CO+CH3CO"``).
+
+    ``cA0`` is set to 5e34 when its exponent exceeds 80, as in the Fortran. Returns
+    ``(n_levels, n_wl)``.
+    """
+    if branch not in _ACETONE_BRANCHES:
+        raise ValueError(f"invalid acetone quantum yield branch: {branch!r}")
+    w = np.asarray(wl_mid, dtype=float)
+    T = np.asarray(temperature_edge, dtype=float)
+    M = np.asarray(air_density_edge, dtype=float)
+    out = np.zeros((T.size, w.size))
+    out[:, w < 279.0] = low_wavelength_value
+    out[:, w > 327.0] = high_wavelength_value
+    mid = (w >= 279.0) & (w <= 327.0)
+    wm = w[mid]
+    wadj = 1.0e7 / wm
+    b1_band = wm < 302.0  # 279 <= λ < 302; the rest of `mid` is 302 <= λ <= 327
+    for i in range(T.size):
+        t = max(minimum_temperature, min(maximum_temperature, T[i])) / 295.0
+        m = M[i]
+        # CO (carbon monoxide) quantum yield
+        a0 = 0.350 * t ** (-1.28)
+        b0 = 0.068 * t ** (-2.65)
+        dumexp = b0 * (wm - 248.0)
+        cA0 = np.where(dumexp > 80.0, 5.0e34, np.exp(np.minimum(dumexp, 80.0)) * a0 / (1.0 - a0))
+        fco = 1.0 / (1.0 + cA0)
+        # CH3CO (acetyl radical) quantum yield
+        fac = np.empty_like(wm)
+        x, f = wadj[b1_band], fco[b1_band]
+        a1 = 1.600e-19 * t ** (-2.38)
+        b1 = 0.55e-3 * t ** (-3.19)
+        cA1 = a1 * np.exp(-b1 * (x - 33113.0))
+        fac[b1_band] = (1.0 - f) / (1.0 + cA1 * m)
+        x, f = wadj[~b1_band], fco[~b1_band]
+        a2 = 1.62e-17 * t ** (-10.03)
+        b2 = 1.79e-3 * t ** (-1.364)
+        cA2 = a2 * np.exp(-b2 * (x - 30488.0))
+        a3 = 26.29 * t ** (-6.59)
+        b3 = 5.72e-7 * t ** (-2.93)
+        c3 = 30006.0 * t ** (-0.064)
+        cA3 = a3 * np.exp(-b3 * (x - c3) ** 2)
+        a4 = 1.67e-15 * t ** (-7.25)
+        b4 = 2.08e-3 * t ** (-1.16)
+        cA4 = a4 * np.exp(-b4 * (x - 30488.0))
+        fac[~b1_band] = (1.0 - f) * (1.0 + cA3 + cA4 * m) / ((1.0 + cA3 + cA2 * m) * (1.0 + cA4 * m))
+        qy = np.zeros_like(wm)
+        if branch in ("CO", "CO+CH3CO"):
+            qy = qy + fco
+        if branch in ("CH3CO", "CO+CH3CO"):
+            qy = qy + fac
+        out[i, mid] = qy
+    return out
 
 
 @dataclass

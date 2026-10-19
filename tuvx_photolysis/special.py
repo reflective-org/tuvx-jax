@@ -16,8 +16,18 @@ per-level temperature [K]:
 * :class:`H2O2CrossSection` -- H2O2: JPL94 temperature-dependent form over [260, 350) nm, base
   tabulated data elsewhere (h2o2-oh_oh.F90).
 * :class:`TintCrossSection`  -- generic temperature interpolation, one or more files each with a
-  temperature axis (no2_tint.F90); linear-in-T == ``numpy.interp``.
+  temperature axis (no2_tint.F90, and type ``tint``: tint.F90); linear-in-T == ``numpy.interp``.
 * :class:`OCloCrossSection`  -- OClO: each file is one temperature node, interpolated across files.
+
+Tropospheric (MCM) recipes:
+
+* :class:`CH2OCrossSection` -- CH2O: ``p1 + p2 * (T - 298)``, no temperature clamp (ch2o.F90).
+* :class:`HNO3CrossSection` also serves the alkyl nitrates: type ``RONO2`` (rono2.F90, e.g.
+  i-C3H7ONO2) and type ``CH3ONO2+hv->CH3O+NO2`` (ch3ono2-ch3o_no2.F90; also C2H5ONO2, PAN, PPN).
+* :func:`nitroxy_acetone_cross_section` -- CH3COCH2ONO2: analytic, T-independent
+  (nitroxy_acetone.F90).
+* :class:`AcetoneCrossSection` -- CH3COCH3: cubic in T clamped to [235, 298] K
+  (acetone-ch3co_ch3.F90).
 """
 
 from __future__ import annotations
@@ -37,6 +47,9 @@ __all__ = [
     "H2O2CrossSection",
     "TintCrossSection",
     "OCloCrossSection",
+    "CH2OCrossSection",
+    "nitroxy_acetone_cross_section",
+    "AcetoneCrossSection",
 ]
 
 # JPL94 H2O2 cross-section polynomial coefficients (h2o2-oh_oh.F90), highest power first for np.polyval.
@@ -73,17 +86,25 @@ def hobr_cross_section(wl_mid, n_levels) -> np.ndarray:
 
 @dataclass
 class HNO3CrossSection:
-    """HNO3 -> OH + NO2: ``sigma0(lambda) * exp(B(lambda) * (T - 298 K))`` (hno3-oh_no2.F90)."""
+    """``sigma0(lambda) * exp(B(lambda) * (T - 298 K))``, no temperature clamp.
+
+    Three Fortran modules share this form and differ only in how B is padded before rebinning:
+
+    * HNO3 -> OH + NO2 (``hno3-oh_no2.F90``) and alkyl nitrates, type ``RONO2`` (``rono2.F90``):
+      B is boundary-extrapolated at both ends (``b_extrap="boundary"``, the default);
+    * CH3ONO2 -> CH3O + NO2 and the other users of that type (``ch3ono2-ch3o_no2.F90``): B is
+      padded like sigma0 by the base ``process_file`` (``b_extrap=None`` -> zero outside the data).
+    """
 
     sigma0: np.ndarray  # (n_wl,)
     b: np.ndarray  # (n_wl,)
 
     @classmethod
-    def from_file(cls, td, wl_edges, lower_extrap=None, upper_extrap=None):
+    def from_file(cls, td, wl_edges, lower_extrap=None, upper_extrap=None, b_extrap="boundary"):
         s0 = _rebin_param(td.wavelength, td.parameters[:, 0], wl_edges, lower_extrap, upper_extrap)
-        # the temperature coefficient B is boundary-extrapolated at both ends (hno3-oh_no2.F90
-        # forces this), which affects its conserving rebin in the edge wavelength cells
-        b = _rebin_param(td.wavelength, td.parameters[:, 1], wl_edges, "boundary", "boundary")
+        # the padding of the temperature coefficient B affects its conserving rebin in the edge
+        # wavelength cells (hno3-oh_no2.F90 / rono2.F90 force "boundary" at both ends)
+        b = _rebin_param(td.wavelength, td.parameters[:, 1], wl_edges, b_extrap, b_extrap)
         return cls(sigma0=s0, b=b)
 
     def evaluate(self, temperature) -> np.ndarray:
@@ -188,7 +209,9 @@ class TintCrossSection:
 
     Each file carries a temperature axis; the cross section is linearly interpolated in temperature
     (== ``numpy.interp``: clamp to the tabulated range, then linear) and summed across files (files
-    cover disjoint wavelength bands, zero elsewhere).
+    cover disjoint wavelength bands, zero elsewhere). Also serves type ``tint`` (tint.F90), which
+    differs from no2_tint.F90 only by a ``min(nTemp, tNdx)`` index guard that cannot trigger once
+    the temperature is clamped to the table.
     """
 
     files: list  # list[_TintFile]
@@ -241,3 +264,76 @@ class OCloCrossSection:
         for w in range(n_wl):
             out[:, w] = np.interp(T, self.temps, self.arrays[:, w])
         return out
+
+
+def _rebin_params(td, wl_edges, lower_extrap=None, upper_extrap=None) -> np.ndarray:
+    """Every parameter column of ``td`` padded and rebinned, shape ``(n_wl, n_params)``.
+
+    Matches the base ``process_file`` in ``src/cross_section.F90``: the same extrapolation is
+    applied to each parameter.
+    """
+    return np.stack(
+        [_rebin_param(td.wavelength, td.parameters[:, p], wl_edges, lower_extrap, upper_extrap)
+         for p in range(td.n_params)],
+        axis=1,
+    )
+
+
+@dataclass
+class CH2OCrossSection:
+    """CH2O (formaldehyde) cross section [cm^2] (ports ``src/cross_sections/ch2o.F90``).
+
+    ``sigma(T) = p1(lambda) + p2(lambda) * (T - 298 K)`` per level, with no temperature clamp. ``p1``
+    and ``p2`` are the two parameters of the first file (``CH2O_1.nc``), each rebinned like the base
+    cross section.
+    """
+
+    p: np.ndarray  # (n_wl, 2)
+
+    @classmethod
+    def from_file(cls, td, wl_edges, lower_extrap=None, upper_extrap=None):
+        return cls(p=_rebin_params(td, wl_edges, lower_extrap, upper_extrap))
+
+    def evaluate(self, temperature) -> np.ndarray:
+        T = np.asarray(temperature, dtype=float)
+        return self.p[None, :, 0] + self.p[None, :, 1] * (T[:, None] - 298.0)
+
+
+@dataclass
+class AcetoneCrossSection:
+    """CH3COCH3 (acetone) -> CH3CO + CH3 cross section [cm^2] (ports
+    ``src/cross_sections/acetone-ch3co_ch3.F90``).
+
+    ``sigma = c1 * (1 + T * (c2 + T * (c3 + T * c4)))`` with ``T`` clamped to [235, 298] K; ``c1..c4``
+    are the four parameters of the first file (``CH3COCH3_1.nc``), each rebinned like the base cross
+    section.
+    """
+
+    c: np.ndarray  # (n_wl, 4)
+
+    @classmethod
+    def from_file(cls, td, wl_edges, lower_extrap=None, upper_extrap=None):
+        if td.n_params != 4:
+            raise ValueError("acetone cross section needs 4 parameters")  # as the Fortran asserts
+        return cls(c=_rebin_params(td, wl_edges, lower_extrap, upper_extrap))
+
+    def evaluate(self, temperature) -> np.ndarray:
+        T = np.clip(np.asarray(temperature, dtype=float), 235.0, 298.0)[:, None]
+        c1, c2, c3, c4 = (self.c[None, :, k] for k in range(4))
+        return c1 * (1.0 + T * (c2 + T * (c3 + T * c4)))
+
+
+def nitroxy_acetone_cross_section(wl_mid, n_levels) -> np.ndarray:
+    """CH3COCH2(ONO2) (nitroxy-acetone) -> CH3COCH2(O.) + NO2 cross section [cm^2] (ports
+    ``src/cross_sections/nitroxy_acetone.F90``).
+
+    ``exp(c + lambda * (b + a * lambda))`` with ``a = -1.365e-3``, ``b = 0.7834``, ``c = -156.8`` at
+    the cell midpoint for 284 <= lambda <= 335 nm, zero elsewhere; temperature-independent (no data
+    files). Shape ``(n_levels, n_wl)``.
+    """
+    wc = np.asarray(wl_mid, dtype=float)
+    a, b, c = -1.365e-3, 0.7834, -156.8
+    band = (wc >= 284.0) & (wc <= 335.0)
+    xs = np.zeros_like(wc)
+    xs[band] = np.exp(c + wc[band] * (b + a * wc[band]))
+    return np.repeat(xs[None, :], n_levels, axis=0)

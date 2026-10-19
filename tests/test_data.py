@@ -77,3 +77,33 @@ def test_load_solar_flux():
     assert flux.wavelength.shape == flux.flux.shape
     assert np.all(flux.flux > 0)
     assert flux.wavelength[0] == pytest.approx(330.5)
+
+
+def test_loads_from_a_folder_with_non_ascii_characters(tmp_path):
+    # Windows: the netCDF/HDF5 C library cannot open such paths itself (a user folder named
+    # "José"); the loader reads the bytes in Python, so the folder name does not matter.
+    folder = tmp_path / "cache-José-データ"
+    folder.mkdir()
+    copy = folder / "O2_1.nc"
+    copy.write_bytes((DATA / "cross_sections" / "O2_1.nc").read_bytes())
+    xs = data.load_cross_section(copy)
+    ref = data.load_cross_section(DATA / "cross_sections" / "O2_1.nc")
+    np.testing.assert_array_equal(xs.parameters, ref.parameters)
+    np.testing.assert_array_equal(xs.wavelength, ref.wavelength)
+
+
+def test_every_data_file_opens_from_memory_with_identical_contents():
+    # from_netcdf hands netCDF the file's bytes (plus zero padding); every bundled file must
+    # open that way and give exactly the arrays netCDF reads from the file on disk
+    import netCDF4
+    files = sorted(DATA.rglob("*.nc"))
+    assert len(files) > 100
+    for path in files:
+        buffer = path.read_bytes() + bytes(data._MEMORY_PADDING_BYTES)
+        with netCDF4.Dataset(str(path)) as disk, \
+                netCDF4.Dataset(path.name, mode="r", memory=buffer) as mem:
+            assert set(mem.variables) == set(disk.variables), path.name
+            for name in disk.variables:
+                np.testing.assert_array_equal(np.array(mem.variables[name][:]),
+                                              np.array(disk.variables[name][:]),
+                                              err_msg=f"{path.name}:{name}")

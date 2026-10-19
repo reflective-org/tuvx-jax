@@ -33,6 +33,15 @@ from .quantum_yield import (
     clooocl_branching_quantum_yield,
     o3_o1d_quantum_yield,
     o3_o3p_quantum_yield,
+    rebin_quantum_yield_params,
+    ch2o_h2_co_quantum_yield,
+    ch3coch2ch3_quantum_yield,
+    ch3cocho_quantum_yield,
+    mvk_quantum_yield,
+    acetone_quantum_yield,
+    ch3cho_ch3_hco_quantum_yield,
+    c2h5cho_quantum_yield,
+    ch2chcho_quantum_yield,
 )
 
 __all__ = ["PhotolysisCalculator"]
@@ -47,6 +56,12 @@ _HEATING_ENERGY_TERMS_NM = {
     "O3+hv->O2+O(1D)": 310.32,
     "O3+hv->O2+O(3P)": 1179.87,
 }
+
+#: Config options of the acetone quantum yield (acetone-ch3co_ch3.F90), passed as keyword arguments.
+_ACETONE_QY_OPTIONS = (
+    "low wavelength value", "high wavelength value", "minimum temperature", "maximum temperature",
+    "branch",
+)
 
 
 @dataclass
@@ -313,7 +328,9 @@ class PhotolysisCalculator:
             xs = rxn["cross section"]
             qy = rxn["quantum yield"]
             try:
-                phi = _eval_reaction_qy(qy, rel, wl_edges, wl_mid, temperature, n_lev, wl_mid.size)
+                phi = _eval_reaction_qy(
+                    qy, rel, wl_edges, wl_mid, temperature, air.edge_val, n_lev, wl_mid.size
+                )
                 if xs.get("apply O2 bands"):
                     # O2 photolysis: LA/SR effective cross section is applied per solve, so keep the
                     # base cross section and quantum yield separately rather than a fixed sigma*phi.
@@ -392,6 +409,39 @@ def _tds(xs_cfg, rel):
     return [data.load_cross_section(rel(nf["file path"])) for nf in xs_cfg["netcdf files"]]
 
 
+def _tds_no_options(xs_cfg, rel):
+    """:func:`_tds` for special cross sections whose port reads no file/extrapolation options.
+
+    The Fortran honours per-file ``lower``/``upper extrapolation``, ``interpolator`` and
+    ``zero below``/``above`` (and, for RONO2, cross-section-level extrapolation). No bundled config
+    sets them for these types, so rather than silently ignoring them the reaction is skipped.
+    """
+    opts = {k for nf in xs_cfg["netcdf files"] for k in nf if k != "file path"}
+    opts |= {k for k in ("lower extrapolation", "upper extrapolation") if k in xs_cfg}
+    if opts:
+        raise _Unsupported(f"cross section type '{xs_cfg['type']}' options {sorted(opts)} not ported")
+    return _tds(xs_cfg, rel)
+
+
+def _qy_tds(qy_cfg, rel):
+    # quantum-yield netcdf files are plain path strings (cross sections use {"file path": ...})
+    paths = [f["file path"] if isinstance(f, dict) else f for f in qy_cfg["netcdf files"]]
+    return [data.load_quantum_yield(rel(p)) for p in paths]
+
+
+def _qy_extrapolation(qy_cfg):
+    """Quantum-yield-level ``lower``/``upper extrapolation`` as add_points keyword arguments."""
+    lo = qy_cfg.get("lower extrapolation") or {}
+    up = qy_cfg.get("upper extrapolation") or {}
+    return dict(lower_extrapolation=lo.get("type"), upper_extrapolation=up.get("type"),
+                lower_value=lo.get("value", 0.0), upper_value=up.get("value", 0.0))
+
+
+def _qy_params(qy_cfg, rel, wl_edges):
+    """``(n_wl, n_params)`` parameters of the first quantum-yield file (as ``base_constructor``)."""
+    return rebin_quantum_yield_params(_qy_tds(qy_cfg, rel)[0], wl_edges, **_qy_extrapolation(qy_cfg))
+
+
 def _eval_reaction_xs(xs_cfg, rel, wl_edges, wl_mid, temperature, n_lev):
     t = xs_cfg.get("type")
     Te = temperature.edge_val  # photolysis cross sections are evaluated at interfaces
@@ -414,13 +464,52 @@ def _eval_reaction_xs(xs_cfg, rel, wl_edges, wl_mid, temperature, n_lev):
         return special.H2O2CrossSection.from_file(_tds(xs_cfg, rel)[0], wl_edges).evaluate(Te)
     if t == "NO2 tint":
         return special.TintCrossSection.from_files(_tds(xs_cfg, rel), wl_edges).evaluate(Te)
+    if t == "tint":
+        # tint.F90 == no2_tint.F90 except an index guard that never triggers after the T clamp
+        return special.TintCrossSection.from_files(_tds_no_options(xs_cfg, rel), wl_edges).evaluate(Te)
     if t == "OClO+hv->Products":
         return special.OCloCrossSection.from_files(_tds(xs_cfg, rel), wl_edges).evaluate(Te)
+    if t == "CH2O":
+        return special.CH2OCrossSection.from_file(_tds_no_options(xs_cfg, rel)[0], wl_edges).evaluate(Te)
+    if t == "RONO2":
+        # rono2.F90 is the hno3-oh_no2.F90 recipe (B boundary-extrapolated)
+        return special.HNO3CrossSection.from_file(_tds_no_options(xs_cfg, rel)[0], wl_edges).evaluate(Te)
+    if t == "CH3ONO2+hv->CH3O+NO2":
+        # same form, but B is padded like the base cross section (zero outside the data)
+        td = _tds_no_options(xs_cfg, rel)[0]
+        return special.HNO3CrossSection.from_file(td, wl_edges, b_extrap=None).evaluate(Te)
+    if t == "CH3COCH2(ONO2)+hv->CH3COCH2(O.)+NO2":
+        return special.nitroxy_acetone_cross_section(wl_mid, n_lev)
+    if t == "CH3COCH3+hv->CH3CO+CH3":
+        return special.AcetoneCrossSection.from_file(_tds_no_options(xs_cfg, rel)[0], wl_edges).evaluate(Te)
     raise _Unsupported(f"cross section type '{t}' not ported")
 
 
-def _eval_reaction_qy(qy_cfg, rel, wl_edges, wl_mid, temperature, n_lev, n_wl):
+def _eval_reaction_qy(qy_cfg, rel, wl_edges, wl_mid, temperature, air_density_edge, n_lev, n_wl):
+    """Quantum yield ``(n_lev, n_wl)`` for a reaction's ``quantum yield`` config block.
+
+    ``air_density_edge`` (air number density at the height interfaces [molecule cm-3]) feeds the
+    pressure-dependent recipes. Unported types raise :class:`_Unsupported` (-> skipped_reactions).
+    """
     t = qy_cfg.get("type")
+    if t == "CH2O":
+        params = _qy_params(qy_cfg, rel, wl_edges)
+        return ch2o_h2_co_quantum_yield(params, wl_mid, temperature.edge_val, air_density_edge)
+    if t == "CH3CHO+hv->CH3+HCO":
+        return ch3cho_ch3_hco_quantum_yield(_qy_params(qy_cfg, rel, wl_edges), air_density_edge)
+    if t == "C2H5CHO":
+        return c2h5cho_quantum_yield(_qy_params(qy_cfg, rel, wl_edges), air_density_edge)
+    if t == "CH2CHCHO+hv->Products":
+        return ch2chcho_quantum_yield(air_density_edge, n_wl)
+    if t == "CH3COCH2CH3+hv->CH3CO+CH2CH3":
+        return ch3coch2ch3_quantum_yield(air_density_edge, n_wl)
+    if t == "CH3COCHO+hv->CH3CO+HCO":
+        return ch3cocho_quantum_yield(wl_mid, air_density_edge)
+    if t == "MVK+hv->Products":
+        return mvk_quantum_yield(wl_mid, air_density_edge)
+    if t == "CH3COCH3+hv->CH3CO+CH3":
+        opts = {key.replace(" ", "_"): qy_cfg[key] for key in _ACETONE_QY_OPTIONS if key in qy_cfg}
+        return acetone_quantum_yield(wl_mid, temperature.edge_val, air_density_edge, **opts)
     if t == "O3+hv->O2+O(1D)":
         return o3_o1d_quantum_yield(wl_mid, temperature.edge_val)
     if t == "O3+hv->O2+O(3P)":
@@ -450,8 +539,8 @@ def _eval_reaction_qy(qy_cfg, rel, wl_edges, wl_mid, temperature, n_lev, n_wl):
         # quantum-yield netcdf files are plain path strings (cross sections use {"file path": ...})
         path = files[0]["file path"] if isinstance(files[0], dict) else files[0]
         td = data.load_quantum_yield(rel(path))
-        if td.n_params != 1:
-            raise _Unsupported("multi-parameter quantum yield not ported")
+        # multi-parameter files (e.g. CH2O_1.nc): the Fortran base ``run`` uses parameter 1 only,
+        # as does TabulatedQuantumYield
         lo = qy_cfg.get("lower extrapolation") or {}
         up = qy_cfg.get("upper extrapolation") or {}
         return TabulatedQuantumYield.from_netcdf(

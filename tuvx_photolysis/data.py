@@ -27,6 +27,9 @@ from pathlib import Path
 import numpy as np
 import netCDF4
 
+# zeros added after a file's bytes when netCDF opens it from memory (see from_netcdf)
+_MEMORY_PADDING_BYTES = 65536
+
 __all__ = [
     "TabulatedData",
     "AtmosphereProfile",
@@ -93,8 +96,17 @@ class TabulatedData:
 
     @classmethod
     def from_netcdf(cls, path: str | Path, prefix: str) -> "TabulatedData":
-        """Load from a TUV-x NetCDF file. ``prefix`` is ``cross_section_`` or ``quantum_yield_``."""
-        with netCDF4.Dataset(str(path)) as ds:
+        """Load from a TUV-x NetCDF file. ``prefix`` is ``cross_section_`` or ``quantum_yield_``.
+
+        The file is read by Python and handed to netCDF as bytes: on Windows the netCDF/HDF5
+        C library cannot open a path with non-ASCII characters (e.g. a user folder named
+        "José"), while Python can. Some netCDF-3 files end before the size netCDF expects
+        when it opens a file from memory (on disk the missing tail reads as fill), so zeros
+        are added after the end; they change no data.
+        """
+        path = Path(path)
+        buffer = path.read_bytes() + bytes(_MEMORY_PADDING_BYTES)
+        with netCDF4.Dataset(path.name, mode="r", memory=buffer) as ds:
             var = ds.variables[f"{prefix}parameters"]
             # File order is (parameters, bins); transpose to (bins, parameters) to match Fortran.
             params = np.array(var[:]).T
